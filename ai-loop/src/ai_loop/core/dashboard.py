@@ -152,16 +152,18 @@ class Dashboard:
             title_style="bold cyan",
             show_header=True,
             header_style="bold",
+            expand=False,  # Don't auto-expand to terminal width
+            min_width=120,  # Fixed minimum width for stability
         )
 
-        table.add_column("Issue", style="dim", width=12)
-        table.add_column("Title", width=40)
-        table.add_column("Stage", width=14)
-        table.add_column("Iter", justify="center", width=4)
-        table.add_column("Conf", justify="center", width=5)
-        table.add_column("Block", justify="center", width=5)
-        table.add_column("Time", justify="center", width=6)
-        table.add_column("Last Event", width=30)
+        table.add_column("Issue", style="dim", width=10, no_wrap=True)
+        table.add_column("Title", width=35, no_wrap=True, overflow="ellipsis")
+        table.add_column("Stage", width=12, no_wrap=True)
+        table.add_column("Iter", justify="center", width=4, no_wrap=True)
+        table.add_column("Conf", justify="center", width=4, no_wrap=True)
+        table.add_column("Blk", justify="center", width=3, no_wrap=True)
+        table.add_column("Time", justify="center", width=6, no_wrap=True)
+        table.add_column("Last Event", width=25, no_wrap=True, overflow="ellipsis")
 
         for progress in self.progress.issues.values():
             # Status styling
@@ -228,6 +230,8 @@ class Dashboard:
             self._build_table(),
             console=self.console,
             refresh_per_second=4,
+            vertical_overflow="visible",  # Prevent clipping artifacts
+            transient=False,  # Keep final state visible
         ) as live:
             self._live = live
             while True:

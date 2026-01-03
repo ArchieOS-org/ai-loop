@@ -70,7 +70,7 @@ class ClaudeRunner:
         template = self._load_prompt("claude_planner")
         issue_pack = issue.to_issue_pack()
         prompt = f"{template}\n\n---\n\n{issue_pack}"
-        stdout, _ = await self._run_claude(prompt, cwd=repo_root)
+        stdout, _ = await self._run_claude(prompt, cwd=repo_root, timeout=600)
         return stdout
 
     async def refine_plan(
@@ -123,7 +123,7 @@ class ClaudeRunner:
 
 {critique_text}
 """
-        stdout, _ = await self._run_claude(prompt, cwd=repo_root)
+        stdout, _ = await self._run_claude(prompt, cwd=repo_root, timeout=600)
         return stdout
 
     async def implement(

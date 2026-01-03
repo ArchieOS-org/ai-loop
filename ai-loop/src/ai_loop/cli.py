@@ -196,12 +196,13 @@ def run(
 
 @app.command()
 def batch(
+    issues: Annotated[Optional[str], typer.Option("--issues", "-i", help="Comma-separated issue IDs (e.g., DIS-56,DIS-57,DIS-58)")] = None,
     team: Annotated[Optional[str], typer.Option("--team", "-t", help="Filter by team name")] = None,
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Filter by project name")] = None,
     state: Annotated[str, typer.Option("--state", "-s", help="Filter by state")] = "Todo",
     label: Annotated[Optional[str], typer.Option("--label", "-l", help="Filter by label")] = None,
     limit: Annotated[int, typer.Option("--limit", help="Max issues to process")] = 20,
-    concurrency: Annotated[int, typer.Option("--concurrency", "-c", help="Concurrent runs")] = 3,
+    concurrency: Annotated[int, typer.Option("--concurrency", "-c", help="Concurrent runs (default 5)")] = 5,
     dry_run: Annotated[Optional[bool], typer.Option("--dry-run/--no-dry-run", help="Don't create branches or implement")] = None,
     max_iterations: Annotated[Optional[int], typer.Option("--max-iterations", help="Max plan iterations")] = None,
     confidence_threshold: Annotated[Optional[int], typer.Option("--confidence-threshold", help="Confidence threshold")] = None,
@@ -224,24 +225,37 @@ def batch(
     async def run_batch():
         # Fetch issues
         linear = LinearClient()
-        console.print(f"[bold]Querying Linear issues...[/bold]")
-        issues = await linear.list_issues(
-            team=team,
-            project=project,
-            state=state,
-            label=label,
-            limit=limit,
-        )
 
-        if not issues:
+        if issues:
+            # Explicit issue IDs provided
+            issue_ids = [i.strip() for i in issues.split(",")]
+            console.print(f"[bold]Fetching {len(issue_ids)} issues...[/bold]")
+            issue_list = []
+            for issue_id in issue_ids:
+                try:
+                    issue_list.append(await linear.get_issue(issue_id))
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Could not fetch {issue_id}: {e}[/yellow]")
+        else:
+            # Query by filters
+            console.print(f"[bold]Querying Linear issues...[/bold]")
+            issue_list = await linear.list_issues(
+                team=team,
+                project=project,
+                state=state,
+                label=label,
+                limit=limit,
+            )
+
+        if not issue_list:
             console.print("[yellow]No issues found matching criteria[/yellow]")
             return
 
-        console.print(f"[green]Found {len(issues)} issues[/green]")
+        console.print(f"[green]Found {len(issue_list)} issues[/green]")
 
         # Setup dashboard
         dashboard = Dashboard()
-        dashboard.add_issues([(i.identifier, i.title) for i in issues])
+        dashboard.add_issues([(i.identifier, i.title) for i in issue_list])
 
         # Create orchestrator
         orchestrator = PipelineOrchestrator(repo_root=repo_root)
@@ -286,7 +300,7 @@ def batch(
 
         # Run dashboard and processing concurrently
         async def run_all():
-            tasks = [process_issue(issue) for issue in issues]
+            tasks = [process_issue(issue) for issue in issue_list]
             await asyncio.gather(*tasks)
 
         # Start dashboard and processing
