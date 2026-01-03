@@ -10,6 +10,16 @@ from ai_loop.core.models import LinearIssue
 
 LINEAR_API_ENDPOINT = "https://api.linear.app/graphql"
 
+# Map UI state labels to Linear workflow state types
+STATE_TYPE_MAP = {
+    "Triage": "triage",
+    "Backlog": "backlog",
+    "Todo": "unstarted",
+    "In Progress": "started",
+    "Done": "completed",
+    "Canceled": "canceled",
+}
+
 
 class LinearClient:
     """Client for Linear GraphQL API."""
@@ -32,11 +42,17 @@ class LinearClient:
     async def _query(self, query: str, variables: dict | None = None) -> dict:
         """Execute a GraphQL query."""
         async with httpx.AsyncClient(timeout=self.timeout) as client:
+            payload = {"query": query, "variables": variables or {}}
             response = await client.post(
                 LINEAR_API_ENDPOINT,
                 headers=self._headers(),
-                json={"query": query, "variables": variables or {}},
+                json=payload,
             )
+            if response.status_code != 200:
+                print(f"[Linear] {response.status_code} error")
+                print(f"[Linear] Query: {query[:200]}...")
+                print(f"[Linear] Variables: {variables}")
+                print(f"[Linear] Response: {response.text[:500]}")
             response.raise_for_status()
             data = response.json()
             if "errors" in data:
@@ -113,7 +129,9 @@ class LinearClient:
         if project:
             filters["project"] = {"name": {"eq": project}}
         if state:
-            filters["state"] = {"name": {"eq": state}}
+            if state not in STATE_TYPE_MAP:
+                raise ValueError(f"Unknown state label: {state}. Valid: {list(STATE_TYPE_MAP.keys())}")
+            filters["state"] = {"type": {"eq": STATE_TYPE_MAP[state]}}
         if label:
             filters["labels"] = {"name": {"eq": label}}
 
@@ -122,10 +140,7 @@ class LinearClient:
             issues(
                 filter: $filter,
                 first: $first,
-                orderBy: [
-                    { priority: { order: Descending, nullsLast: true } },
-                    { updatedAt: Descending }
-                ]
+                orderBy: updatedAt
             ) {
                 nodes {
                     id

@@ -297,6 +297,11 @@ def batch(
                         error=str(e),
                         last_event=f"Error: {str(e)[:20]}",
                     )
+                finally:
+                    # Clean up lock file for web UI idempotency
+                    lock_path = ctx.artifacts_dir.parent / "locks" / f"{issue.identifier}.lock"
+                    if lock_path.exists():
+                        lock_path.unlink()
 
         # Run dashboard and processing concurrently
         async def run_all():
@@ -392,6 +397,39 @@ def list_runs() -> None:
         )
 
     console.print(table)
+
+
+@app.command()
+def serve(
+    port: Annotated[int, typer.Option("--port", "-p", help="Server port")] = 8080,
+    open_browser: Annotated[bool, typer.Option("--open", help="Open browser")] = False,
+    enable_writes: Annotated[bool, typer.Option("--enable-writes", help="Allow real implementations (not just dry-run)")] = False,
+) -> None:
+    """Start web dashboard server.
+
+    By default, web-triggered runs are dry-run only (safe).
+    Use --enable-writes to allow real branch creation and implementation.
+    """
+    from ai_loop.integrations.git_tools import GitTools
+    from ai_loop.web.server import run_server
+
+    git = GitTools()
+    repo_root = git.get_repo_root()
+    artifacts_dir = repo_root / "artifacts"
+    artifacts_dir.mkdir(exist_ok=True)
+
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(f"http://127.0.0.1:{port}")
+
+    # Blocking call - runs until Ctrl-C
+    run_server(
+        port=port,
+        artifacts_dir=artifacts_dir,
+        repo_root=repo_root,
+        enable_writes=enable_writes,
+    )
 
 
 if __name__ == "__main__":
