@@ -1,0 +1,139 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CritiqueResult",
+  "description": "Structured output from Codex critique (PLAN_GATE or CODE_GATE)",
+  "type": "object",
+  "properties": {
+    "confidence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Confidence score 0-100. Must be justified in feedback."
+    },
+    "approved": {
+      "type": "boolean",
+      "description": "Whether the artifact (plan or code) is approved"
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Blocking issues that MUST be resolved before approval"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Non-blocking warnings and suggestions"
+    },
+    "feedback": {
+      "type": "string",
+      "description": "Detailed feedback explaining the confidence score and assessment"
+    },
+    "diff_instructions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "location": {
+            "type": "string",
+            "description": "File path and line/section reference"
+          },
+          "change_type": {
+            "type": "string",
+            "enum": ["add", "remove", "modify", "move"],
+            "description": "Type of change needed"
+          },
+          "before": {
+            "type": "string",
+            "description": "Current state (for modify/remove)"
+          },
+          "after": {
+            "type": "string",
+            "description": "Desired state (for add/modify)"
+          }
+        },
+        "required": ["location", "change_type"],
+        "additionalProperties": false
+      },
+      "description": "Specific changes needed with location and before/after"
+    },
+    "rubric_breakdown": {
+      "type": "object",
+      "properties": {
+        "goal_clarity": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "How clearly the goal is defined"
+        },
+        "scope_minimality": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "How minimal and focused the scope is"
+        },
+        "ux_contract": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Quality of UX contract definition"
+        },
+        "data_contract": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Quality of data contract definition"
+        },
+        "architecture": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Architecture quality and appropriateness"
+        },
+        "test_coverage": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Test strategy and coverage plan"
+        },
+        "rollout_safety": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Rollout and deployment safety"
+        },
+        "done_checklist": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Completeness of done checklist"
+        }
+      },
+      "required": [
+        "goal_clarity",
+        "scope_minimality",
+        "ux_contract",
+        "data_contract",
+        "architecture",
+        "test_coverage",
+        "rollout_safety",
+        "done_checklist"
+      ],
+      "additionalProperties": false,
+      "description": "Breakdown of scores across 8 rubric categories"
+    }
+  },
+  "required": [
+    "confidence",
+    "approved",
+    "blockers",
+    "warnings",
+    "feedback",
+    "diff_instructions",
+    "rubric_breakdown"
+  ],
+  "additionalProperties": false
+}

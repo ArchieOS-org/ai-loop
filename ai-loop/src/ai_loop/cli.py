@@ -1,0 +1,300 @@
+"""CLI for AI Loop."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import Annotated, Optional
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from ai_loop.config import get_settings
+from ai_loop.core.artifacts import ArtifactManager
+from ai_loop.core.dashboard import Dashboard, SimpleDashboard
+from ai_loop.core.orchestrator import PipelineOrchestrator
+from ai_loop.integrations.linear import LinearClient
+
+app = typer.Typer(
+    name="ai-loop",
+    help="CLI orchestrator: Linear issues → Claude plans → Codex critique → Claude implementation",
+    no_args_is_help=True,
+)
+console = Console()
+
+
+def _get_default_bool(env_value: bool | None, default: bool) -> bool:
+    """Get boolean with environment default."""
+    return env_value if env_value is not None else default
+
+
+@app.command()
+def run(
+    issue: Annotated[str, typer.Option("--issue", "-i", help="Linear issue identifier (e.g., LIN-123)")],
+    dry_run: Annotated[Optional[bool], typer.Option("--dry-run", help="Don't create branches or implement")] = None,
+    max_iterations: Annotated[Optional[int], typer.Option("--max-iterations", help="Max plan iterations")] = None,
+    confidence_threshold: Annotated[Optional[int], typer.Option("--confidence-threshold", help="Confidence threshold (0-100)")] = None,
+    stable_passes: Annotated[Optional[int], typer.Option("--stable-passes", help="Required stable gate passes")] = None,
+    repo_root: Annotated[Optional[Path], typer.Option("--repo-root", help="Repository root (auto-detected)")] = None,
+    use_worktree: Annotated[Optional[bool], typer.Option("--use-worktree/--no-worktree", help="Use git worktree for isolation")] = None,
+    no_linear_writeback: Annotated[bool, typer.Option("--no-linear-writeback", help="Don't comment on Linear issue")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Verbose output")] = False,
+) -> None:
+    """Run pipeline for a single Linear issue."""
+    settings = get_settings()
+
+    # Apply defaults from settings
+    dry_run = dry_run if dry_run is not None else settings.dry_run_default
+    max_iterations = max_iterations or settings.max_iterations_default
+    confidence_threshold = confidence_threshold or settings.confidence_threshold_default
+    stable_passes = stable_passes or settings.stable_passes_default
+    use_worktree = use_worktree if use_worktree is not None else settings.use_worktree_default
+    no_linear_writeback = no_linear_writeback or settings.no_linear_writeback_default
+
+    async def run_async():
+        # Fetch issue
+        linear = LinearClient()
+        console.print(f"[bold]Fetching issue:[/bold] {issue}")
+        linear_issue = await linear.get_issue(issue)
+        console.print(f"[green]Found:[/green] {linear_issue.title}")
+
+        # Create orchestrator and context
+        orchestrator = PipelineOrchestrator(repo_root=repo_root)
+        ctx = await orchestrator.create_context(
+            linear_issue,
+            dry_run=dry_run,
+            max_iterations=max_iterations,
+            confidence_threshold=confidence_threshold,
+            stable_passes=stable_passes,
+            use_worktree=use_worktree,
+            no_linear_writeback=no_linear_writeback,
+            verbose=verbose,
+        )
+
+        # Setup simple dashboard
+        dashboard = SimpleDashboard()
+
+        def on_status_change(c):
+            dashboard.status_update(c)
+
+        def on_event(event_type, data):
+            if verbose:
+                dashboard.event(event_type, data)
+
+        console.print(f"\n[bold cyan]Starting pipeline run:[/bold cyan] {ctx.run_id}")
+        if dry_run:
+            console.print("[yellow]DRY RUN MODE - no branches or implementation[/yellow]")
+        console.print()
+
+        # Run pipeline
+        result = await orchestrator.run_pipeline(
+            ctx,
+            on_status_change=on_status_change,
+            on_event=on_event,
+        )
+
+        # Print result
+        console.print()
+        if result.status.value == "success":
+            console.print("[bold green]✓ Pipeline completed successfully![/bold green]")
+        else:
+            console.print(f"[bold red]✗ Pipeline {result.status.value}[/bold red]")
+            if result.error_message:
+                console.print(f"[red]Error: {result.error_message}[/red]")
+
+        console.print(f"\nArtifacts: {result.artifacts_dir}")
+        if result.branch_name:
+            console.print(f"Branch: {result.branch_name}")
+
+    asyncio.run(run_async())
+
+
+@app.command()
+def batch(
+    team: Annotated[Optional[str], typer.Option("--team", "-t", help="Filter by team name")] = None,
+    project: Annotated[Optional[str], typer.Option("--project", "-p", help="Filter by project name")] = None,
+    state: Annotated[str, typer.Option("--state", "-s", help="Filter by state")] = "Todo",
+    label: Annotated[Optional[str], typer.Option("--label", "-l", help="Filter by label")] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Max issues to process")] = 20,
+    concurrency: Annotated[int, typer.Option("--concurrency", "-c", help="Concurrent runs")] = 3,
+    dry_run: Annotated[Optional[bool], typer.Option("--dry-run", help="Don't create branches or implement")] = None,
+    max_iterations: Annotated[Optional[int], typer.Option("--max-iterations", help="Max plan iterations")] = None,
+    confidence_threshold: Annotated[Optional[int], typer.Option("--confidence-threshold", help="Confidence threshold")] = None,
+    stable_passes: Annotated[Optional[int], typer.Option("--stable-passes", help="Required stable passes")] = None,
+    repo_root: Annotated[Optional[Path], typer.Option("--repo-root", help="Repository root")] = None,
+    use_worktree: Annotated[Optional[bool], typer.Option("--use-worktree/--no-worktree", help="Use git worktree")] = None,
+    no_linear_writeback: Annotated[bool, typer.Option("--no-linear-writeback", help="Don't comment on Linear")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Verbose output")] = False,
+) -> None:
+    """Run pipeline for multiple Linear issues with live dashboard."""
+    settings = get_settings()
+
+    # Apply defaults
+    dry_run = dry_run if dry_run is not None else settings.dry_run_default
+    max_iterations = max_iterations or settings.max_iterations_default
+    confidence_threshold = confidence_threshold or settings.confidence_threshold_default
+    stable_passes = stable_passes or settings.stable_passes_default
+    use_worktree = use_worktree if use_worktree is not None else settings.use_worktree_default
+
+    async def run_batch():
+        # Fetch issues
+        linear = LinearClient()
+        console.print(f"[bold]Querying Linear issues...[/bold]")
+        issues = await linear.list_issues(
+            team=team,
+            project=project,
+            state=state,
+            label=label,
+            limit=limit,
+        )
+
+        if not issues:
+            console.print("[yellow]No issues found matching criteria[/yellow]")
+            return
+
+        console.print(f"[green]Found {len(issues)} issues[/green]")
+
+        # Setup dashboard
+        dashboard = Dashboard()
+        dashboard.add_issues([(i.identifier, i.title) for i in issues])
+
+        # Create orchestrator
+        orchestrator = PipelineOrchestrator(repo_root=repo_root)
+
+        # Semaphore for concurrency
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def process_issue(issue):
+            async with semaphore:
+                dashboard.update(issue.identifier, status="planning", last_event="Starting...")
+
+                ctx = await orchestrator.create_context(
+                    issue,
+                    dry_run=dry_run,
+                    max_iterations=max_iterations,
+                    confidence_threshold=confidence_threshold,
+                    stable_passes=stable_passes,
+                    use_worktree=use_worktree,
+                    no_linear_writeback=no_linear_writeback,
+                    verbose=verbose,
+                )
+
+                def on_status_change(c):
+                    dashboard.update_from_context(c)
+
+                def on_event(event_type, data):
+                    dashboard.update(issue.identifier, last_event=event_type)
+
+                try:
+                    await orchestrator.run_pipeline(
+                        ctx,
+                        on_status_change=on_status_change,
+                        on_event=on_event,
+                    )
+                except Exception as e:
+                    dashboard.update(
+                        issue.identifier,
+                        status="failed",
+                        error=str(e),
+                        last_event=f"Error: {str(e)[:20]}",
+                    )
+
+        # Run dashboard and processing concurrently
+        async def run_all():
+            tasks = [process_issue(issue) for issue in issues]
+            await asyncio.gather(*tasks)
+
+        # Start dashboard and processing
+        dashboard_task = asyncio.create_task(dashboard.run())
+        processing_task = asyncio.create_task(run_all())
+
+        await processing_task
+        dashboard.stop()
+        await dashboard_task
+
+        # Print summary
+        console.print()
+        console.print(f"[bold]Batch complete:[/bold] {dashboard.progress.completed} succeeded, {dashboard.progress.failed} failed")
+
+    asyncio.run(run_batch())
+
+
+@app.command()
+def watch(
+    run_id: Annotated[str, typer.Option("--run-id", "-r", help="Run ID to watch")],
+) -> None:
+    """Tail a run log and show latest status."""
+    from ai_loop.integrations.git_tools import GitTools
+
+    git = GitTools()
+    artifacts = ArtifactManager(git.get_repo_root() / "artifacts")
+
+    trace_events = artifacts.read_trace(run_id)
+
+    if not trace_events:
+        console.print(f"[yellow]No trace found for run: {run_id}[/yellow]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]Trace for run:[/bold] {run_id}")
+    console.print()
+
+    for event in trace_events:
+        timestamp = event.timestamp.strftime("%H:%M:%S")
+        console.print(f"[dim]{timestamp}[/dim] [{event.stage}] {event.event_type}")
+        if event.data:
+            for key, value in event.data.items():
+                console.print(f"        {key}: {value}")
+
+
+@app.command("list-runs")
+def list_runs() -> None:
+    """List recent runs."""
+    from ai_loop.integrations.git_tools import GitTools
+
+    try:
+        git = GitTools()
+        artifacts = ArtifactManager(git.get_repo_root() / "artifacts")
+    except Exception:
+        console.print("[yellow]Not in a git repository or no artifacts found[/yellow]")
+        return
+
+    runs = artifacts.list_runs()
+
+    if not runs:
+        console.print("[dim]No runs found[/dim]")
+        return
+
+    table = Table(title="Recent Runs")
+    table.add_column("Run ID", style="cyan")
+    table.add_column("Issue")
+    table.add_column("Status")
+    table.add_column("Iterations", justify="center")
+    table.add_column("Confidence", justify="center")
+    table.add_column("Branch")
+    table.add_column("Completed")
+
+    for run in runs[:20]:
+        status_style = ""
+        if run.status.value == "success":
+            status_style = "green"
+        elif run.status.value == "failed":
+            status_style = "red"
+
+        completed = run.completed_at.strftime("%Y-%m-%d %H:%M") if run.completed_at else "-"
+
+        table.add_row(
+            run.run_id[:30] + "..." if len(run.run_id) > 30 else run.run_id,
+            run.issue_identifier,
+            f"[{status_style}]{run.status.value}[/{status_style}]" if status_style else run.status.value,
+            str(run.iterations),
+            str(run.final_confidence) if run.final_confidence else "-",
+            run.branch_name[:30] + "..." if len(run.branch_name) > 30 else run.branch_name,
+            completed,
+        )
+
+    console.print(table)
+
+
+if __name__ == "__main__":
+    app()
