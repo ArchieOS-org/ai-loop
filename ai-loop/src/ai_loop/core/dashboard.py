@@ -255,20 +255,142 @@ class Dashboard:
 
 
 class SimpleDashboard:
-    """Simple console output for single runs or non-interactive mode."""
+    """Simple console output for single runs or non-interactive mode.
 
-    def __init__(self):
+    Shows:
+    - Spinner with stage label + elapsed time during operations
+    - Key events (gate results, approvals, errors) always shown
+    - Raw events only in verbose mode
+    """
+
+    # Stage labels for display
+    STAGE_LABELS = {
+        "planning": "PLAN",
+        "plan_gate": "GATE",
+        "refining": "REFINE",
+        "implementing": "IMPL",
+        "code_gate": "REVIEW",
+        "fixing": "FIX",
+    }
+
+    def __init__(self, issue_id: str | None = None, batch_mode: bool = False):
         self.console = Console()
+        self.issue_id = issue_id
+        self.batch_mode = batch_mode
+        self._status_context = None
+        self._stage_start: datetime | None = None
+
+    def _format_elapsed(self) -> str:
+        """Format elapsed time since stage start."""
+        if not self._stage_start:
+            return "0:00"
+        delta = datetime.now() - self._stage_start
+        total_seconds = int(delta.total_seconds())
+        minutes, seconds = divmod(total_seconds, 60)
+        return f"{minutes}:{seconds:02d}"
+
+    def _stage_prefix(self, stage: str) -> str:
+        """Build stage prefix with optional issue ID for batch mode."""
+        label = self.STAGE_LABELS.get(stage, stage.upper())
+        if self.batch_mode and self.issue_id:
+            return f"[{self.issue_id}][{label}]"
+        return f"[{label}]"
+
+    def start_stage(self, stage: str, description: str) -> None:
+        """Start a stage with spinner display."""
+        self._stage_start = datetime.now()
+        prefix = self._stage_prefix(stage)
+        self._status_context = self.console.status(
+            f"{prefix} {description}... ({self._format_elapsed()})",
+            spinner="dots",
+        )
+        self._status_context.start()
+        self._current_stage = stage
+        self._current_description = description
+
+    def update_stage(self, extra: str = "") -> None:
+        """Update the spinner with current elapsed time."""
+        if self._status_context:
+            prefix = self._stage_prefix(self._current_stage)
+            msg = f"{prefix} {self._current_description}... ({self._format_elapsed()})"
+            if extra:
+                msg += f" {extra}"
+            self._status_context.update(msg)
+
+    def stop_stage(self) -> None:
+        """Stop the current stage spinner."""
+        if self._status_context:
+            self._status_context.stop()
+            self._status_context = None
+            self._stage_start = None
 
     def log(self, message: str, style: str = "") -> None:
-        """Log a message."""
+        """Log a message (stops spinner if running)."""
+        if self._status_context:
+            self._status_context.stop()
         if style:
             self.console.print(message, style=style)
         else:
             self.console.print(message)
+        if self._status_context:
+            self._status_context.start()
+
+    def key_event(self, event_type: str, data: dict) -> None:
+        """Print a key event (always shown, not just verbose)."""
+        # Stop spinner briefly to print
+        if self._status_context:
+            self._status_context.stop()
+
+        if event_type == "plan_gate_result":
+            conf = data.get("confidence", "?")
+            blockers = data.get("blockers", 0)
+            approved = data.get("approved", False)
+            result = "approved" if approved else "rejected"
+            blocker_str = f"{blockers} blockers | " if blockers else ""
+            self.console.print(f"  → Confidence: {conf} | {blocker_str}{result}")
+
+        elif event_type == "code_gate_result":
+            conf = data.get("confidence", "?")
+            blockers = data.get("blockers", 0)
+            approved = data.get("approved", False)
+            result = "approved" if approved else "rejected"
+            blocker_str = f"{blockers} blockers | " if blockers else ""
+            self.console.print(f"  → Confidence: {conf} | {blocker_str}{result}")
+
+        elif event_type == "plan_approved":
+            iterations = data.get("iterations", "?")
+            self.console.print(
+                f"  → Plan approved ({iterations} iterations)",
+                style="green",
+            )
+
+        elif event_type == "plan_gate_passed":
+            stable = data.get("stable_count", "?")
+            self.console.print(f"  → Gate passed (stable: {stable})")
+
+        elif event_type == "plan_gate_failed":
+            blockers = data.get("blockers", [])
+            if blockers:
+                self.console.print(f"  → Gate failed: {blockers[0][:60]}...", style="yellow")
+
+        elif event_type == "code_gate_passed":
+            self.console.print("  → Code approved", style="green")
+
+        elif event_type == "code_gate_failed":
+            blockers = data.get("blockers", [])
+            if blockers:
+                self.console.print(f"  → Review failed: {blockers[0][:60]}...", style="yellow")
+
+        elif event_type == "pipeline_error":
+            error = data.get("error", "Unknown error")
+            self.console.print(f"  → Error: {error}", style="red")
+
+        # Restart spinner if it was running
+        if self._status_context:
+            self._status_context.start()
 
     def status_update(self, ctx: "RunContext") -> None:
-        """Print a status update."""
+        """Print a status update line."""
         confidence = None
         if ctx.plan_gates:
             confidence = ctx.plan_gates[-1].confidence
@@ -276,12 +398,41 @@ class SimpleDashboard:
             confidence = ctx.code_gates[-1].confidence
 
         self.console.print(
-            f"[{ctx.status.value}] "
-            f"Iteration {ctx.current_iteration} | "
+            f" Iteration {ctx.current_iteration} | "
             f"Confidence: {confidence or 'N/A'} | "
             f"Stable passes: {ctx.stable_pass_count}"
         )
 
     def event(self, event_type: str, data: dict) -> None:
-        """Print an event."""
-        self.console.print(f"  → {event_type}: {data}", style="dim")
+        """Print an event (verbose mode only, dim style)."""
+        self.console.print(f"  [dim]{event_type}: {data}[/dim]")
+
+    def show_failure(
+        self,
+        stage: str,
+        exit_code: int | None,
+        error_msg: str,
+        artifacts_path: str,
+    ) -> None:
+        """Show formatted failure output per UX contract."""
+        self.console.print()
+        self.console.print(f"[bold red]✗ Pipeline failed at {stage.upper()}[/bold red]")
+        self.console.print()
+        if exit_code is not None:
+            self.console.print(f"  Exit code: {exit_code}")
+        self.console.print(f"  Error: {error_msg}")
+        self.console.print()
+        self.console.print(f"  Artifacts: {artifacts_path}")
+        self.console.print(f"  Logs: {artifacts_path}/trace.jsonl")
+        self.console.print()
+        self.console.print("  Next: re-run with --verbose and inspect trace.jsonl")
+
+    def show_interrupt(self, artifacts_path: str, branch_name: str) -> None:
+        """Show formatted interrupt output per UX contract."""
+        self.console.print()
+        self.console.print("[bold yellow]⚠ Interrupted by user[/bold yellow]")
+        self.console.print()
+        self.console.print(f"  Partial artifacts saved to: {artifacts_path}")
+        self.console.print(f"  Branch preserved: {branch_name}")
+        self.console.print()
+        self.console.print("  Resume: ai-loop run --issue ISSUE-ID --continue-from run-id")

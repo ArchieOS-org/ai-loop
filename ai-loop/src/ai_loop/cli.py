@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -15,6 +16,7 @@ from ai_loop.core.artifacts import ArtifactManager
 from ai_loop.core.dashboard import Dashboard, SimpleDashboard
 from ai_loop.core.orchestrator import PipelineOrchestrator
 from ai_loop.integrations.linear import LinearClient
+
 
 app = typer.Typer(
     name="ai-loop",
@@ -32,7 +34,7 @@ def _get_default_bool(env_value: bool | None, default: bool) -> bool:
 @app.command()
 def run(
     issue: Annotated[str, typer.Option("--issue", "-i", help="Linear issue identifier (e.g., LIN-123)")],
-    dry_run: Annotated[Optional[bool], typer.Option("--dry-run", help="Don't create branches or implement")] = None,
+    dry_run: Annotated[Optional[bool], typer.Option("--dry-run/--no-dry-run", help="Don't create branches or implement")] = None,
     max_iterations: Annotated[Optional[int], typer.Option("--max-iterations", help="Max plan iterations")] = None,
     confidence_threshold: Annotated[Optional[int], typer.Option("--confidence-threshold", help="Confidence threshold (0-100)")] = None,
     stable_passes: Annotated[Optional[int], typer.Option("--stable-passes", help="Required stable gate passes")] = None,
@@ -72,14 +74,47 @@ def run(
             verbose=verbose,
         )
 
-        # Setup simple dashboard
-        dashboard = SimpleDashboard()
+        # Setup simple dashboard with issue ID
+        dashboard = SimpleDashboard(issue_id=linear_issue.identifier)
+
+        # Key events to always show (not just verbose)
+        KEY_EVENTS = {
+            "plan_gate_result", "code_gate_result", "plan_approved",
+            "plan_gate_passed", "plan_gate_failed", "code_gate_passed",
+            "code_gate_failed", "pipeline_error",
+        }
+
+        # Stage mapping for spinner
+        STAGE_DESCRIPTIONS = {
+            "planning": "Generating plan with Claude",
+            "plan_gate": f"Critiquing plan (iter {ctx.current_iteration})",
+            "refining": "Updating plan from feedback",
+            "implementing": "Claude implementing plan",
+            "code_gate": "Critiquing implementation",
+            "fixing": "Fixing code from feedback",
+        }
+
+        current_stage = None
 
         def on_status_change(c):
-            dashboard.status_update(c)
+            nonlocal current_stage
+            new_stage = c.status.value
+            if new_stage != current_stage:
+                # Stop previous stage spinner
+                dashboard.stop_stage()
+                # Start new stage
+                desc = STAGE_DESCRIPTIONS.get(new_stage, new_stage)
+                if new_stage == "plan_gate":
+                    desc = f"Critiquing plan (iter {c.current_iteration})"
+                dashboard.start_stage(new_stage, desc)
+                current_stage = new_stage
 
         def on_event(event_type, data):
-            if verbose:
+            # Always show key events
+            if event_type in KEY_EVENTS:
+                dashboard.key_event(event_type, data)
+            # Show all events in verbose mode
+            elif verbose:
                 dashboard.event(event_type, data)
 
         console.print(f"\n[bold cyan]Starting pipeline run:[/bold cyan] {ctx.run_id}")
@@ -87,21 +122,70 @@ def run(
             console.print("[yellow]DRY RUN MODE - no branches or implementation[/yellow]")
         console.print()
 
+        # Get event loop for proper signal handling
+        loop = asyncio.get_running_loop()
+        interrupted = False
+        pipeline_task = None
+
+        def handle_sigint():
+            """Asyncio-safe signal handler - cancels tasks instead of raising."""
+            nonlocal interrupted
+            interrupted = True
+            if pipeline_task and not pipeline_task.done():
+                pipeline_task.cancel()
+
+        # Use asyncio's signal handler (runs in event loop context, not as interrupt)
+        loop.add_signal_handler(signal.SIGINT, handle_sigint)
+
+        # Background task to update elapsed time every second
+        async def update_elapsed():
+            while True:
+                await asyncio.sleep(1)
+                dashboard.update_stage()
+
+        elapsed_task = asyncio.create_task(update_elapsed())
+
         # Run pipeline
-        result = await orchestrator.run_pipeline(
-            ctx,
-            on_status_change=on_status_change,
-            on_event=on_event,
-        )
+        try:
+            pipeline_task = asyncio.create_task(
+                orchestrator.run_pipeline(
+                    ctx,
+                    on_status_change=on_status_change,
+                    on_event=on_event,
+                )
+            )
+            result = await pipeline_task
+        except asyncio.CancelledError:
+            if interrupted:
+                # User pressed Ctrl-C - handle gracefully
+                dashboard.stop_stage()
+                dashboard.show_interrupt(
+                    artifacts_path=str(ctx.artifacts_dir),
+                    branch_name=ctx.branch_name or "unknown",
+                )
+                return
+            raise  # Re-raise if not from our interrupt
+        finally:
+            # Cancel elapsed timer and wait for clean shutdown
+            elapsed_task.cancel()
+            try:
+                await elapsed_task
+            except asyncio.CancelledError:
+                pass
+            dashboard.stop_stage()
+            loop.remove_signal_handler(signal.SIGINT)
 
         # Print result
         console.print()
         if result.status.value == "success":
             console.print("[bold green]✓ Pipeline completed successfully![/bold green]")
         else:
-            console.print(f"[bold red]✗ Pipeline {result.status.value}[/bold red]")
-            if result.error_message:
-                console.print(f"[red]Error: {result.error_message}[/red]")
+            dashboard.show_failure(
+                stage=current_stage or "unknown",
+                exit_code=None,
+                error_msg=result.error_message or "Unknown error",
+                artifacts_path=str(result.artifacts_dir),
+            )
 
         console.print(f"\nArtifacts: {result.artifacts_dir}")
         if result.branch_name:
@@ -118,7 +202,7 @@ def batch(
     label: Annotated[Optional[str], typer.Option("--label", "-l", help="Filter by label")] = None,
     limit: Annotated[int, typer.Option("--limit", help="Max issues to process")] = 20,
     concurrency: Annotated[int, typer.Option("--concurrency", "-c", help="Concurrent runs")] = 3,
-    dry_run: Annotated[Optional[bool], typer.Option("--dry-run", help="Don't create branches or implement")] = None,
+    dry_run: Annotated[Optional[bool], typer.Option("--dry-run/--no-dry-run", help="Don't create branches or implement")] = None,
     max_iterations: Annotated[Optional[int], typer.Option("--max-iterations", help="Max plan iterations")] = None,
     confidence_threshold: Annotated[Optional[int], typer.Option("--confidence-threshold", help="Confidence threshold")] = None,
     stable_passes: Annotated[Optional[int], typer.Option("--stable-passes", help="Required stable passes")] = None,

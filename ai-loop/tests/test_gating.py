@@ -24,14 +24,14 @@ class TestGateLogic:
             feedback="Looks good",
             diff_instructions=[],
             rubric_breakdown=RubricBreakdown(
-                goal_clarity=95,
-                scope_minimality=90,
-                ux_contract=95,
-                data_contract=92,
-                architecture=90,
-                test_coverage=85,
-                rollout_safety=95,
-                done_checklist=90,
+                clarity_single_intent=95,
+                smallest_vertical_slice=90,
+                apple_native_ux=95,
+                single_source_of_truth=92,
+                simplicity_subtraction=90,
+                edge_cases_failure_modes=85,
+                testability_rollout_safety=95,
+                consistency_with_patterns=90,
             ),
         )
         assert check_gate(critique, threshold=97) == GateResult.PASS
@@ -45,14 +45,14 @@ class TestGateLogic:
             feedback="Not approved",
             diff_instructions=[],
             rubric_breakdown=RubricBreakdown(
-                goal_clarity=95,
-                scope_minimality=90,
-                ux_contract=95,
-                data_contract=92,
-                architecture=90,
-                test_coverage=85,
-                rollout_safety=95,
-                done_checklist=90,
+                clarity_single_intent=95,
+                smallest_vertical_slice=90,
+                apple_native_ux=95,
+                single_source_of_truth=92,
+                simplicity_subtraction=90,
+                edge_cases_failure_modes=85,
+                testability_rollout_safety=95,
+                consistency_with_patterns=90,
             ),
         )
         assert check_gate(critique, threshold=97) == GateResult.FAIL
@@ -66,14 +66,14 @@ class TestGateLogic:
             feedback="Good but not great",
             diff_instructions=[],
             rubric_breakdown=RubricBreakdown(
-                goal_clarity=85,
-                scope_minimality=85,
-                ux_contract=85,
-                data_contract=85,
-                architecture=85,
-                test_coverage=85,
-                rollout_safety=85,
-                done_checklist=85,
+                clarity_single_intent=85,
+                smallest_vertical_slice=85,
+                apple_native_ux=85,
+                single_source_of_truth=85,
+                simplicity_subtraction=85,
+                edge_cases_failure_modes=85,
+                testability_rollout_safety=85,
+                consistency_with_patterns=85,
             ),
         )
         assert check_gate(critique, threshold=97) == GateResult.FAIL
@@ -87,14 +87,14 @@ class TestGateLogic:
             feedback="Almost there",
             diff_instructions=[],
             rubric_breakdown=RubricBreakdown(
-                goal_clarity=95,
-                scope_minimality=90,
-                ux_contract=80,
-                data_contract=92,
-                architecture=90,
-                test_coverage=85,
-                rollout_safety=95,
-                done_checklist=90,
+                clarity_single_intent=95,
+                smallest_vertical_slice=90,
+                apple_native_ux=80,
+                single_source_of_truth=92,
+                simplicity_subtraction=90,
+                edge_cases_failure_modes=85,
+                testability_rollout_safety=95,
+                consistency_with_patterns=90,
             ),
         )
         assert check_gate(critique, threshold=97) == GateResult.FAIL
@@ -108,14 +108,14 @@ class TestGateLogic:
             feedback="Just meets threshold",
             diff_instructions=[],
             rubric_breakdown=RubricBreakdown(
-                goal_clarity=97,
-                scope_minimality=97,
-                ux_contract=97,
-                data_contract=97,
-                architecture=97,
-                test_coverage=97,
-                rollout_safety=97,
-                done_checklist=97,
+                clarity_single_intent=97,
+                smallest_vertical_slice=97,
+                apple_native_ux=97,
+                single_source_of_truth=97,
+                simplicity_subtraction=97,
+                edge_cases_failure_modes=97,
+                testability_rollout_safety=97,
+                consistency_with_patterns=97,
             ),
         )
         assert check_gate(critique, threshold=97) == GateResult.PASS
@@ -129,14 +129,14 @@ class TestGateLogic:
             feedback="Just below threshold",
             diff_instructions=[],
             rubric_breakdown=RubricBreakdown(
-                goal_clarity=96,
-                scope_minimality=96,
-                ux_contract=96,
-                data_contract=96,
-                architecture=96,
-                test_coverage=96,
-                rollout_safety=96,
-                done_checklist=96,
+                clarity_single_intent=96,
+                smallest_vertical_slice=96,
+                apple_native_ux=96,
+                single_source_of_truth=96,
+                simplicity_subtraction=96,
+                edge_cases_failure_modes=96,
+                testability_rollout_safety=96,
+                consistency_with_patterns=96,
             ),
         )
         assert check_gate(critique, threshold=97) == GateResult.FAIL
@@ -159,14 +159,14 @@ class TestCritiqueModel:
         # Values must be 0-100
         with pytest.raises(ValueError):
             RubricBreakdown(
-                goal_clarity=101,  # Invalid
-                scope_minimality=90,
-                ux_contract=90,
-                data_contract=90,
-                architecture=90,
-                test_coverage=90,
-                rollout_safety=90,
-                done_checklist=90,
+                clarity_single_intent=101,  # Invalid
+                smallest_vertical_slice=90,
+                apple_native_ux=90,
+                single_source_of_truth=90,
+                simplicity_subtraction=90,
+                edge_cases_failure_modes=90,
+                testability_rollout_safety=90,
+                consistency_with_patterns=90,
             )
 
     def test_confidence_validation(self):

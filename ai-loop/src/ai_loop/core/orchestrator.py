@@ -191,7 +191,6 @@ class PipelineOrchestrator:
                     ctx.plan_versions[-1].content,
                     ctx.current_iteration,
                     ctx,
-                    event_callback=lambda e: log("codex_event", e),
                 )
                 ctx.plan_gates.append(critique)
                 log(
@@ -275,7 +274,6 @@ class PipelineOrchestrator:
                         test_results,
                         fix_iteration,
                         ctx,
-                        event_callback=lambda e: log("codex_event", e),
                     )
                     ctx.code_gates.append(critique)
                     log(

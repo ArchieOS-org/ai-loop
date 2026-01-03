@@ -83,14 +83,14 @@ class DiffInstruction(BaseModel):
 class RubricBreakdown(BaseModel):
     """Rubric scores from critique (each 0-100)."""
 
-    goal_clarity: int = Field(ge=0, le=100, description="Goal clarity score")
-    scope_minimality: int = Field(ge=0, le=100, description="Scope minimality score")
-    ux_contract: int = Field(ge=0, le=100, description="UX contract score")
-    data_contract: int = Field(ge=0, le=100, description="Data contract score")
-    architecture: int = Field(ge=0, le=100, description="Architecture score")
-    test_coverage: int = Field(ge=0, le=100, description="Test coverage score")
-    rollout_safety: int = Field(ge=0, le=100, description="Rollout safety score")
-    done_checklist: int = Field(ge=0, le=100, description="Done checklist score")
+    clarity_single_intent: int = Field(ge=0, le=100, description="Is outcome aligned with single intent?")
+    smallest_vertical_slice: int = Field(ge=0, le=100, description="Did implementation stay minimal?")
+    apple_native_ux: int = Field(ge=0, le=100, description="Are all user-visible states native?")
+    single_source_of_truth: int = Field(ge=0, le=100, description="Single canonical source of truth?")
+    simplicity_subtraction: int = Field(ge=0, le=100, description="Is code simpler than alternatives?")
+    edge_cases_failure_modes: int = Field(ge=0, le=100, description="Are edge cases and failures handled?")
+    testability_rollout_safety: int = Field(ge=0, le=100, description="Can this be rolled out safely?")
+    consistency_with_patterns: int = Field(ge=0, le=100, description="Matches repo conventions?")
 
 
 class CritiqueResult(BaseModel):
@@ -106,14 +106,14 @@ class CritiqueResult(BaseModel):
     )
     rubric_breakdown: RubricBreakdown = Field(
         default_factory=lambda: RubricBreakdown(
-            goal_clarity=0,
-            scope_minimality=0,
-            ux_contract=0,
-            data_contract=0,
-            architecture=0,
-            test_coverage=0,
-            rollout_safety=0,
-            done_checklist=0,
+            clarity_single_intent=0,
+            smallest_vertical_slice=0,
+            apple_native_ux=0,
+            single_source_of_truth=0,
+            simplicity_subtraction=0,
+            edge_cases_failure_modes=0,
+            testability_rollout_safety=0,
+            consistency_with_patterns=0,
         )
     )
 

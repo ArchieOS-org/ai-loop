@@ -48,14 +48,14 @@
           },
           "before": {
             "type": "string",
-            "description": "Current state (for modify/remove)"
+            "description": "Current state (for modify/remove). Empty string if not applicable."
           },
           "after": {
             "type": "string",
-            "description": "Desired state (for add/modify)"
+            "description": "Desired state (for add/modify). Empty string if not applicable."
           }
         },
-        "required": ["location", "change_type"],
+        "required": ["location", "change_type", "before", "after"],
         "additionalProperties": false
       },
       "description": "Specific changes needed with location and before/after"
@@ -63,64 +63,64 @@
     "rubric_breakdown": {
       "type": "object",
       "properties": {
-        "goal_clarity": {
+        "clarity_single_intent": {
           "type": "integer",
           "minimum": 0,
           "maximum": 100,
-          "description": "How clearly the goal is defined"
+          "description": "Is the outcome aligned with the plan's single intent?"
         },
-        "scope_minimality": {
+        "smallest_vertical_slice": {
           "type": "integer",
           "minimum": 0,
           "maximum": 100,
-          "description": "How minimal and focused the scope is"
+          "description": "Did implementation stay minimal without scope creep?"
         },
-        "ux_contract": {
+        "apple_native_ux": {
           "type": "integer",
           "minimum": 0,
           "maximum": 100,
-          "description": "Quality of UX contract definition"
+          "description": "Are all user-visible states native and matching patterns?"
         },
-        "data_contract": {
+        "single_source_of_truth": {
           "type": "integer",
           "minimum": 0,
           "maximum": 100,
-          "description": "Quality of data contract definition"
+          "description": "Does implementation preserve single canonical source of truth?"
         },
-        "architecture": {
+        "simplicity_subtraction": {
           "type": "integer",
           "minimum": 0,
           "maximum": 100,
-          "description": "Architecture quality and appropriateness"
+          "description": "Is code simpler than alternatives, avoiding over-engineering?"
         },
-        "test_coverage": {
+        "edge_cases_failure_modes": {
           "type": "integer",
           "minimum": 0,
           "maximum": 100,
-          "description": "Test strategy and coverage plan"
+          "description": "Are edge cases handled and do failures degrade gracefully?"
         },
-        "rollout_safety": {
+        "testability_rollout_safety": {
           "type": "integer",
           "minimum": 0,
           "maximum": 100,
-          "description": "Rollout and deployment safety"
+          "description": "Are tests concrete, can this be rolled out and back safely?"
         },
-        "done_checklist": {
+        "consistency_with_patterns": {
           "type": "integer",
           "minimum": 0,
           "maximum": 100,
-          "description": "Completeness of done checklist"
+          "description": "Does code match repo's architecture, naming, conventions?"
         }
       },
       "required": [
-        "goal_clarity",
-        "scope_minimality",
-        "ux_contract",
-        "data_contract",
-        "architecture",
-        "test_coverage",
-        "rollout_safety",
-        "done_checklist"
+        "clarity_single_intent",
+        "smallest_vertical_slice",
+        "apple_native_ux",
+        "single_source_of_truth",
+        "simplicity_subtraction",
+        "edge_cases_failure_modes",
+        "testability_rollout_safety",
+        "consistency_with_patterns"
       ],
       "additionalProperties": false,
       "description": "Breakdown of scores across 8 rubric categories"

@@ -59,9 +59,10 @@ def get_settings() -> Settings:
 
 def get_prompts_dir() -> Path:
     """Get the prompts directory path."""
-    return Path(__file__).parent.parent.parent.parent / "prompts"
+    # __file__ is src/ai_loop/config.py, go up to ai-loop/ then into prompts/
+    return Path(__file__).parent.parent.parent / "prompts"
 
 
 def get_schemas_dir() -> Path:
     """Get the schemas directory path."""
-    return Path(__file__).parent.parent.parent.parent / "schemas"
+    return Path(__file__).parent.parent.parent / "schemas"

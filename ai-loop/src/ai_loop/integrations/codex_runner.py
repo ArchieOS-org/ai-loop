@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, AsyncIterator
@@ -13,6 +14,12 @@ from ai_loop.core.models import CritiqueResult
 
 if TYPE_CHECKING:
     from ai_loop.core.models import RunContext
+
+logger = logging.getLogger(__name__)
+
+# Module-level cache keyed by codex command path (survives batch/concurrency)
+_CODEX_CAPS_CACHE: dict[str, dict[str, bool]] = {}
+_DETECTION_TIMEOUT = 10  # seconds - fail closed if exceeded
 
 
 class CodexRunner:
@@ -35,34 +42,115 @@ class CodexRunner:
         """Get path to critique schema."""
         return self.schemas_dir / "critique_schema.json"
 
+    async def _detect_codex_capabilities(self) -> dict[str, bool]:
+        """Run `codex exec --help` once, cache supported flags.
+
+        Caches at module level (survives multiple runner instances in batch).
+        Parses both stdout AND stderr (some CLIs print help to stderr).
+        Times out after 10s and fails closed (conservative defaults).
+        """
+        # Check module-level cache first
+        if self.cmd in _CODEX_CAPS_CACHE:
+            return _CODEX_CAPS_CACHE[self.cmd]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.cmd, "exec", "--help",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=_DETECTION_TIMEOUT
+            )
+            # Parse BOTH stdout and stderr (CLIs vary on where help goes)
+            help_text = (stdout + stderr).decode(errors="replace")
+
+            caps = {
+                "approval_mode": "--approval-mode" in help_text,
+                "full_auto": "--full-auto" in help_text,
+                "json": "--json" in help_text,
+                "output_schema": "--output-schema" in help_text,
+                "quiet": "-q" in help_text or "--quiet" in help_text,
+            }
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Codex capability detection timed out after {_DETECTION_TIMEOUT}s; "
+                "using conservative defaults"
+            )
+            caps = {
+                "approval_mode": False,
+                "full_auto": False,
+                "json": False,
+                "output_schema": True,
+                "quiet": False,
+            }
+        except Exception as e:
+            logger.warning(
+                f"Codex capability detection failed: {e}; using conservative defaults"
+            )
+            caps = {
+                "approval_mode": False,
+                "full_auto": False,
+                "json": False,
+                "output_schema": True,
+                "quiet": False,
+            }
+
+        _CODEX_CAPS_CACHE[self.cmd] = caps
+        return caps
+
+    async def _build_codex_args(
+        self, schema_path: Path, output_path: Path, prompt: str
+    ) -> list[str]:
+        """Build args based on detected capabilities.
+
+        Note: --json is intentionally NOT used in V1. It streams JSONL to stdout
+        which would need routing to trace.jsonl while still relying on -o for
+        structured output. Orchestrator stage events provide sufficient visibility.
+        """
+        caps = await self._detect_codex_capabilities()
+
+        args = [self.cmd, "exec"]
+
+        # Approval mode: use what's available, log if missing
+        if caps["approval_mode"]:
+            args.extend(["--approval-mode", "full-auto"])
+        elif caps["full_auto"]:
+            args.append("--full-auto")
+        else:
+            # Log once, continue without - Codex will use defaults
+            if not hasattr(self, "_logged_no_approval"):
+                logger.warning("Codex: approval mode unsupported; using defaults")
+                self._logged_no_approval = True
+
+        # Quiet mode: only add if supported
+        if caps["quiet"]:
+            args.append("-q")
+
+        args.extend(["--output-schema", str(schema_path), "-o", str(output_path)])
+
+        # V1: Don't use --json. Rely on orchestrator stage events for visibility.
+        # Future: If --json enabled, capture JSONL stream to trace.jsonl
+
+        args.append(prompt)
+        return args
+
     async def _run_codex_exec(
         self,
         prompt: str,
         cwd: Path,
         output_path: Path,
         timeout: int = 300,
-        use_json: bool = True,
-    ) -> AsyncIterator[dict]:
-        """
-        Run codex exec with structured output.
-        Yields JSONL events if --json is supported.
+    ) -> None:
+        """Run codex exec with structured output.
+
+        Uses capability detection to build correct command args.
+        V1: Does not use --json streaming; relies on orchestrator stage events.
         """
         schema_path = self._get_schema_path()
 
-        # Build command
-        cmd_parts = [
-            self.cmd,
-            "exec",
-            "--approval-mode", "full-auto",
-            "-q",  # quiet mode
-            "--output-schema", str(schema_path),
-            "-o", str(output_path),
-        ]
-
-        if use_json:
-            cmd_parts.append("--json")
-
-        cmd_parts.append(prompt)
+        # Build command using detected capabilities
+        cmd_parts = await self._build_codex_args(schema_path, output_path, prompt)
 
         proc = await asyncio.create_subprocess_exec(
             *cmd_parts,
@@ -72,43 +160,33 @@ class CodexRunner:
             stderr=asyncio.subprocess.PIPE,
         )
 
-        # Stream stdout for JSONL events
-        events: list[dict] = []
         try:
-            async def read_output():
-                assert proc.stdout is not None
-                while True:
-                    line = await proc.stdout.readline()
-                    if not line:
-                        break
-                    line_str = line.decode().strip()
-                    if line_str and use_json:
-                        try:
-                            event = json.loads(line_str)
-                            events.append(event)
-                            yield event
-                        except json.JSONDecodeError:
-                            pass
-
-            async for event in read_output():
-                yield event
-
-            await asyncio.wait_for(proc.wait(), timeout=timeout)
-
+            # V1: Just wait for completion, no JSONL streaming
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
             raise TimeoutError(f"Codex timed out after {timeout}s")
 
+        # Codex may exit non-zero for MCP client errors, warnings, etc.
+        # but still produce valid output. Check output file before failing.
         if proc.returncode != 0:
-            stderr = await proc.stderr.read() if proc.stderr else b""
-            # Try without --json flag if it failed
-            if use_json and b"unknown flag" in stderr.lower():
-                async for event in self._run_codex_exec(
-                    prompt, cwd, output_path, timeout, use_json=False
-                ):
-                    yield event
-                return
+            # Check if output was still produced (Codex can succeed with warnings)
+            if output_path.exists():
+                try:
+                    with open(output_path) as f:
+                        data = json.load(f)
+                    # Valid JSON output exists - log warning but continue
+                    if data:  # Non-empty output
+                        logger.warning(
+                            f"Codex exited with code {proc.returncode} but produced valid output"
+                        )
+                        return  # Success - output is usable
+                except (json.JSONDecodeError, Exception):
+                    pass  # Invalid output - fall through to raise error
+
             raise RuntimeError(
                 f"Codex exited with code {proc.returncode}: {stderr.decode()}"
             )
@@ -119,7 +197,6 @@ class CodexRunner:
         plan: str,
         version: int,
         ctx: RunContext,
-        event_callback: callable | None = None,
     ) -> CritiqueResult:
         """Run PLAN_GATE critique on a plan."""
         template = self._load_prompt("codex_plan_gate")
@@ -139,14 +216,12 @@ class CodexRunner:
 
         output_path = ctx.artifacts_dir / f"plan_gate_v{version}.json"
 
-        async for event in self._run_codex_exec(
+        await self._run_codex_exec(
             prompt,
             cwd=ctx.repo_root,
             output_path=output_path,
             timeout=300,
-        ):
-            if event_callback:
-                event_callback(event)
+        )
 
         # Parse output
         return self._parse_critique_output(output_path)
@@ -158,7 +233,6 @@ class CodexRunner:
         test_results: str | None,
         version: int,
         ctx: RunContext,
-        event_callback: callable | None = None,
     ) -> CritiqueResult:
         """Run CODE_GATE critique on implemented code."""
         template = self._load_prompt("codex_code_gate")
@@ -185,14 +259,12 @@ class CodexRunner:
 
         output_path = ctx.artifacts_dir / f"code_gate_v{version}.json"
 
-        async for event in self._run_codex_exec(
+        await self._run_codex_exec(
             prompt,
             cwd=ctx.working_dir(),
             output_path=output_path,
             timeout=300,
-        ):
-            if event_callback:
-                event_callback(event)
+        )
 
         return self._parse_critique_output(output_path)
 

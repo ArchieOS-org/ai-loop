@@ -97,14 +97,14 @@ class ClaudeRunner:
 {critique.feedback}
 
 ### Rubric Breakdown
-- Goal Clarity: {critique.rubric_breakdown.goal_clarity}/100
-- Scope Minimality: {critique.rubric_breakdown.scope_minimality}/100
-- UX Contract: {critique.rubric_breakdown.ux_contract}/100
-- Data Contract: {critique.rubric_breakdown.data_contract}/100
-- Architecture: {critique.rubric_breakdown.architecture}/100
-- Test Coverage: {critique.rubric_breakdown.test_coverage}/100
-- Rollout Safety: {critique.rubric_breakdown.rollout_safety}/100
-- Done Checklist: {critique.rubric_breakdown.done_checklist}/100
+- Clarity/Single Intent: {critique.rubric_breakdown.clarity_single_intent}/100
+- Smallest Vertical Slice: {critique.rubric_breakdown.smallest_vertical_slice}/100
+- Apple Native UX: {critique.rubric_breakdown.apple_native_ux}/100
+- Single Source of Truth: {critique.rubric_breakdown.single_source_of_truth}/100
+- Simplicity/Subtraction: {critique.rubric_breakdown.simplicity_subtraction}/100
+- Edge Cases/Failure Modes: {critique.rubric_breakdown.edge_cases_failure_modes}/100
+- Testability/Rollout Safety: {critique.rubric_breakdown.testability_rollout_safety}/100
+- Consistency with Patterns: {critique.rubric_breakdown.consistency_with_patterns}/100
 """
 
         prompt = f"""{template}
