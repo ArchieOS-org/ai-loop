@@ -51,6 +51,13 @@ class Settings(BaseSettings):
         default=None, description="Codex API key (CI only)"
     )
 
+    # OpenAI critique settings
+    openai_api_key: str | None = Field(default=None, description="OpenAI API key")
+    critique_model: str = Field(default="gpt-4.1", description="Model for critique")
+    critique_max_concurrent: int = Field(
+        default=3, description="Max concurrent critique API calls"
+    )
+
 
 def get_settings() -> Settings:
     """Get application settings, loading from .env if present."""

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ai-loop"
 version = "0.1.0"
-description = "CLI orchestrator: Linear issues → Claude plans → Codex critique → Claude implementation"
+description = "CLI orchestrator: Linear issues → Claude plans → OpenAI critique → Claude implementation"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -20,6 +20,7 @@ dependencies = [
     "httpx>=0.26.0",
     "tenacity>=8.2.0",
     "python-dotenv>=1.0.0",
+    "openai>=1.50.0",
 ]
 
 [project.optional-dependencies]

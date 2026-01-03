@@ -17,8 +17,8 @@ from ai_loop.core.models import (
     RunStatus,
 )
 from ai_loop.integrations.claude_runner import ClaudeRunner
-from ai_loop.integrations.codex_runner import CodexRunner
 from ai_loop.integrations.git_tools import GitTools
+from ai_loop.integrations.openai_critique_runner import OpenAICritiqueRunner
 from ai_loop.integrations.linear import LinearClient
 from ai_loop.safety.sanitizer import sanitize_issue_content, sanitize_issue_title
 
@@ -43,7 +43,7 @@ class PipelineOrchestrator:
         self.artifacts = ArtifactManager(self.artifacts_root)
         self.linear = LinearClient()
         self.claude = ClaudeRunner()
-        self.codex = CodexRunner()
+        self.critique = OpenAICritiqueRunner()
 
     def _generate_run_id(self, issue_identifier: str) -> str:
         """Generate a unique run ID."""
@@ -136,9 +136,9 @@ class PipelineOrchestrator:
 
         Stages:
         1. Generate initial plan (Claude)
-        2. PLAN_GATE loop (Codex critique → Claude refine) until stable
+        2. PLAN_GATE loop (OpenAI critique → Claude refine) until stable
         3. Implement (Claude)
-        4. CODE_GATE loop (Codex critique → Claude fix) until pass or max attempts
+        4. CODE_GATE loop (OpenAI critique → Claude fix) until pass or max attempts
         """
         ctx.started_at = datetime.now()
 
@@ -185,12 +185,14 @@ class PipelineOrchestrator:
                 update_status(RunStatus.PLAN_GATE)
                 log("plan_gate_started", {"iteration": ctx.current_iteration})
 
-                # Run Codex critique
-                critique = await self.codex.plan_gate(
+                # Run OpenAI critique
+                prev_critique = ctx.plan_gates[-1] if ctx.plan_gates else None
+                critique = await self.critique.plan_gate(
                     issue_pack,
                     ctx.plan_versions[-1].content,
                     ctx.current_iteration,
                     ctx,
+                    prev_critique=prev_critique,
                 )
                 ctx.plan_gates.append(critique)
                 log(
@@ -268,7 +270,7 @@ class PipelineOrchestrator:
                     # TODO: Actually run tests and capture output
                     test_results = None
 
-                    critique = await self.codex.code_gate(
+                    critique = await self.critique.code_gate(
                         ctx.final_plan,
                         git_diff,
                         test_results,
