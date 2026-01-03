@@ -53,7 +53,7 @@ class Settings(BaseSettings):
 
     # OpenAI critique settings
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
-    critique_model: str = Field(default="gpt-4.1", description="Model for critique")
+    critique_model: str = Field(default="gpt-5.2", description="Model for critique")
     critique_max_concurrent: int = Field(
         default=3, description="Max concurrent critique API calls"
     )
