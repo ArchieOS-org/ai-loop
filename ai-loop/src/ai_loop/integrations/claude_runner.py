@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ai_loop.config import get_settings, get_prompts_dir
+from ai_loop.core.logging import log
 
 if TYPE_CHECKING:
     from ai_loop.core.models import CritiqueResult, LinearIssue, RunContext
@@ -35,6 +37,12 @@ class ClaudeRunner:
         timeout: int = 300,
     ) -> tuple[str, str]:
         """Run Claude CLI with prompt via stdin, return (stdout, stderr)."""
+        log("CLAUDE", f"Invoking: {self.cmd} --print -p <prompt>")
+        log("CLAUDE", f"Working dir: {cwd}")
+        log("CLAUDE", f"Timeout: {timeout}s")
+
+        start_time = time.time()
+
         proc = await asyncio.create_subprocess_exec(
             self.cmd,
             "--print",
@@ -54,11 +62,14 @@ class ClaudeRunner:
             await proc.wait()
             raise TimeoutError(f"Claude timed out after {timeout}s")
 
+        elapsed = time.time() - start_time
+
         if proc.returncode != 0:
             raise RuntimeError(
                 f"Claude exited with code {proc.returncode}: {stderr.decode()}"
             )
 
+        log("CLAUDE", f"Completed in {elapsed:.1f}s, output: {len(stdout)} chars")
         return stdout.decode(), stderr.decode()
 
     async def generate_plan(

@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ai_loop.config import get_settings
+from ai_loop.core.logging import log
 from ai_loop.core.artifacts import ArtifactManager
 from ai_loop.core.dashboard import Dashboard, SimpleDashboard
 from ai_loop.core.orchestrator import PipelineOrchestrator
@@ -252,6 +253,7 @@ def batch(
             return
 
         console.print(f"[green]Found {len(issue_list)} issues[/green]")
+        log("BATCH", f"Processing {len(issue_list)} issues with concurrency {concurrency}")
 
         # Setup dashboard
         dashboard = Dashboard()
@@ -265,6 +267,7 @@ def batch(
 
         async def process_issue(issue):
             async with semaphore:
+                log("BATCH", f"Starting: {issue.identifier} - {issue.title[:50]}")
                 dashboard.update(issue.identifier, status="planning", last_event="Starting...")
 
                 ctx = await orchestrator.create_context(
@@ -285,12 +288,14 @@ def batch(
                     dashboard.update(issue.identifier, last_event=event_type)
 
                 try:
-                    await orchestrator.run_pipeline(
+                    result = await orchestrator.run_pipeline(
                         ctx,
                         on_status_change=on_status_change,
                         on_event=on_event,
                     )
+                    log("BATCH", f"Completed: {issue.identifier} -> {result.status.value}")
                 except Exception as e:
+                    log("BATCH", f"Failed: {issue.identifier} -> {str(e)[:50]}")
                     dashboard.update(
                         issue.identifier,
                         status="failed",

@@ -7,6 +7,48 @@
   <link rel="stylesheet" href="/v2/css/tokens.css">
   <link rel="stylesheet" href="/v2/css/components.css">
   <link rel="stylesheet" href="/v2/css/utilities.css">
+  <style>
+    /* Toast Notifications */
+    #notification-container {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      pointer-events: none;
+    }
+    .notification {
+      padding: 0.75rem 1rem;
+      border-radius: 6px;
+      font-size: 0.875rem;
+      color: #fff;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      animation: slideIn 0.2s ease-out, fadeOut 0.3s ease-in 4.7s;
+      pointer-events: auto;
+    }
+    .notification-error {
+      background: #dc2626;
+    }
+    .notification-warning {
+      background: #d97706;
+    }
+    .notification-success {
+      background: #16a34a;
+    }
+    .notification-info {
+      background: #2563eb;
+    }
+    @keyframes slideIn {
+      from { transform: translateX(100%); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+    @keyframes fadeOut {
+      from { opacity: 1; }
+      to { opacity: 0; }
+    }
+  </style>
 </head>
 <body>
   <!-- Hidden CSRF token -->

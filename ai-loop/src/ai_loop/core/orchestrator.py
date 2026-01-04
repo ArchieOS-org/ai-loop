@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from ai_loop.core.artifacts import ArtifactManager
+from ai_loop.core.logging import log as term_log
 from ai_loop.core.models import (
     ApprovalMode,
     CritiqueResult,
@@ -265,6 +266,11 @@ class PipelineOrchestrator:
             self.artifacts.write_issue_pack(ctx, issue_pack)
             log("pipeline_started", {"issue": ctx.issue.identifier})
 
+            # Terminal logging for visibility
+            term_log("PIPELINE", f"Starting run for {ctx.issue.identifier}")
+            term_log("PIPELINE", f"Run ID: {ctx.run_id}")
+            term_log("PIPELINE", f"Mode: {'dry-run' if ctx.dry_run else 'write'}")
+
             # Setup git isolation (unless dry run)
             if not ctx.dry_run:
                 if ctx.use_worktree and ctx.worktree_dir:
@@ -277,6 +283,7 @@ class PipelineOrchestrator:
             # === PLANNING PHASE ===
             update_status(RunStatus.PLANNING)
             log("planning_started")
+            term_log("PLANNING", "Generating plan with Claude...")
 
             # Generate initial plan
             plan_content = await self.claude.generate_plan(safe_issue, ctx.repo_root)
@@ -290,6 +297,7 @@ class PipelineOrchestrator:
             while ctx.current_iteration <= ctx.max_iterations:
                 update_status(RunStatus.PLAN_GATE)
                 log("plan_gate_started", {"iteration": ctx.current_iteration})
+                term_log("PLAN_GATE", f"Running critique (iteration {ctx.current_iteration})...")
 
                 # Run OpenAI critique
                 prev_critique = ctx.plan_gates[-1] if ctx.plan_gates else None
@@ -309,6 +317,7 @@ class PipelineOrchestrator:
                         "blockers": len(critique.blockers),
                     },
                 )
+                term_log("PLAN_GATE", f"Result: confidence={critique.confidence}, approved={critique.approved}")
 
                 # Check gate
                 gate_result = self._check_gate(critique, ctx.confidence_threshold)
@@ -335,16 +344,19 @@ class PipelineOrchestrator:
                 if gate_result == GateResult.PASS:
                     ctx.stable_pass_count += 1
                     log("plan_gate_passed", {"stable_count": ctx.stable_pass_count})
+                    term_log("PLAN_GATE", f"Passed (stable count: {ctx.stable_pass_count})")
 
                     if ctx.stable_pass_count >= ctx.stable_passes:
                         # Plan approved!
                         ctx.final_plan = ctx.plan_versions[-1].content
                         self.artifacts.write_final_plan(ctx, ctx.final_plan)
                         log("plan_approved", {"iterations": ctx.current_iteration})
+                        term_log("PLAN_GATE", f"Stable count: {ctx.stable_pass_count} -> Plan approved!")
                         break
                 else:
                     ctx.stable_pass_count = 0
                     log("plan_gate_failed", {"blockers": critique.blockers})
+                    term_log("PLAN_GATE", f"Failed with {len(critique.blockers)} blockers")
 
                 # Check for stuck state
                 if self._detect_stuck(ctx):
@@ -356,6 +368,7 @@ class PipelineOrchestrator:
                 # Refine plan
                 update_status(RunStatus.REFINING)
                 ctx.current_iteration += 1
+                term_log("REFINING", f"Refining plan (iteration {ctx.current_iteration})...")
 
                 # Include human feedback if available
                 human_feedback = ctx.human_feedback
@@ -384,6 +397,7 @@ class PipelineOrchestrator:
             if ctx.final_plan and not ctx.dry_run:
                 update_status(RunStatus.IMPLEMENTING)
                 log("implementation_started")
+                term_log("IMPLEMENTING", "Claude implementing final plan...")
 
                 implement_log = await self.claude.implement(ctx.final_plan, ctx)
                 self.artifacts.write_implement_log(ctx, implement_log)
@@ -394,6 +408,7 @@ class PipelineOrchestrator:
                 while fix_iteration < MAX_FIX_ITERATIONS:
                     update_status(RunStatus.CODE_GATE)
                     log("code_gate_started", {"fix_iteration": fix_iteration})
+                    term_log("CODE_GATE", "Running code critique...")
 
                     # Get diff and run tests
                     git_diff = await self.git.get_diff(ctx.working_dir())
@@ -416,6 +431,7 @@ class PipelineOrchestrator:
                             "blockers": len(critique.blockers),
                         },
                     )
+                    term_log("CODE_GATE", f"Result: confidence={critique.confidence}, approved={critique.approved}")
 
                     gate_result = self._check_gate(critique, ctx.confidence_threshold)
 
@@ -438,9 +454,11 @@ class PipelineOrchestrator:
                     if gate_result == GateResult.PASS:
                         ctx.status = RunStatus.SUCCESS
                         log("code_gate_passed")
+                        term_log("CODE_GATE", "Passed -> Implementation complete!")
                         break
                     else:
                         log("code_gate_failed", {"blockers": critique.blockers})
+                        term_log("CODE_GATE", f"Failed with {len(critique.blockers)} blockers")
 
                         # Try to fix
                         fix_iteration += 1
@@ -478,6 +496,7 @@ class PipelineOrchestrator:
             ctx.completed_at = datetime.now()
             self.artifacts.write_summary(ctx)
             log("pipeline_completed", {"status": ctx.status.value})
+            term_log("PIPELINE", f"Completed with status: {ctx.status.value}")
 
             # Cleanup worktree on failure (optional)
             # if ctx.worktree_dir and ctx.status == RunStatus.FAILED:

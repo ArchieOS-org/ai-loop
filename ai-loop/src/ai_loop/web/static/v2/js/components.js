@@ -387,6 +387,33 @@ function setupGlobalApproval() {
   });
 }
 
+// Notification system
+function showNotification(message, type = 'info') {
+  let container = document.getElementById('notification-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'notification-container';
+    container.style.cssText = `
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    `;
+    document.body.appendChild(container);
+  }
+
+  const toast = document.createElement('div');
+  toast.className = `notification notification-${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+
+  // Auto-dismiss after 5s
+  setTimeout(() => toast.remove(), 5000);
+}
+
 // Utility functions
 function escapeHtml(str) {
   const div = document.createElement('div');
@@ -528,15 +555,42 @@ function setupIssuePicker() {
       });
 
       const result = await response.json();
+
       if (result.error) {
         console.error('[IssuePicker] Start error:', result.error);
+        showNotification(`Start failed: ${result.error}`, 'error');
       } else {
+        // IMMEDIATELY add pending stubs to UI (keyed by temp_id = issue_identifier)
+        if (result.stubs) {
+          for (const stub of result.stubs) {
+            // Store under temp_id (issue_identifier) - will be reconciled later
+            Store.updateRun(stub.temp_id, {
+              run_id: stub.temp_id,  // Temporary - SSE will provide real run_id
+              issue_identifier: stub.issue_identifier,
+              status: 'pending',
+              is_stub: true,  // Flag for reconciliation
+              approval_mode: Store.getState().globalApprovalMode || 'auto',
+              started_at: new Date().toISOString(),
+            });
+          }
+          Components.renderRunList();
+        }
+
+        // Show rejection reasons if any
+        if (result.rejected && result.rejected.length > 0) {
+          const reasons = result.rejected.map(id =>
+            `${id}: ${result.reason_by_issue[id] || 'already running'}`
+          ).join('\n');
+          showNotification(`Some issues skipped:\n${reasons}`, 'warning');
+        }
+
         // Clear selection on success
         selectedIssues.clear();
         renderIssueList();
       }
     } catch (error) {
       console.error('[IssuePicker] Start failed:', error);
+      showNotification(`Network error: ${error.message}`, 'error');
     } finally {
       updateStartButton();
     }

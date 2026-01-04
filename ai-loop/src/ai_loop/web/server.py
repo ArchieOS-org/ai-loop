@@ -17,6 +17,8 @@ from socketserver import ThreadingMixIn
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from ai_loop.core.logging import is_high_signal, log
+
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     """HTTP server that handles each request in a separate thread."""
@@ -468,7 +470,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         project = params.get("project", [None])[0]
         limit = int(params.get("limit", ["20"])[0])
 
-        print(f"[API] GET /api/issues state={state} team={team} project={project} limit={limit}")
+        log("API", f"GET /api/issues state={state} team={team} project={project} limit={limit}")
 
         async def fetch():
             from ai_loop.integrations.linear import LinearClient
@@ -478,7 +480,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         try:
             issues = asyncio.run(fetch())
-            print(f"[API] Found {len(issues)} issues")
+            log("API", f"Found {len(issues)} issues")
             self._send_json([
                 {
                     "identifier": i.identifier,
@@ -491,7 +493,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 for i in issues
             ])
         except Exception as e:
-            print(f"[API] ERROR fetching issues: {e}")
+            log("ERROR", f"Fetching issues: {e}")
             traceback.print_exc()
             self._send_json({"error": str(e)}, 500)
 
@@ -666,6 +668,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         job_id = secrets.token_hex(8)
         mode = "write_enabled" if self.enable_writes else "dry_run"
 
+        log("API", f"POST /api/runs issues={issue_ids} concurrency={concurrency}")
+
         if not issue_ids:
             self._send_json({"error": "issue_identifiers required"}, 400)
             return
@@ -700,6 +704,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     reason_by_issue[issue_id] = "already running"
                 rejected.append(issue_id)
 
+        log("API", f"Acquired locks: {started}")
+        if rejected:
+            log("API", f"Rejected: {rejected}")
+
         if not started:
             self._send_json({
                 "job_id": job_id,
@@ -726,14 +734,39 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if not self.enable_writes:
             cmd.append("--dry-run")
 
-        # Spawn detached subprocess
+        log("API", f"Spawning: {' '.join(cmd)}")
+
+        # Create log file for this job
+        jobs_dir = self.artifacts_dir / "jobs"
+        jobs_dir.mkdir(exist_ok=True)
+        log_path = jobs_dir / f"{job_id}.log"
+
+        # Spawn subprocess with captured output
         proc = subprocess.Popen(
             cmd,
             cwd=str(self.repo_root),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # Merge stderr into stdout
             start_new_session=True,
+            text=True,
+            bufsize=1,  # Line buffered
         )
+
+        # Background thread: filtered tee - ALL output to log file, only HIGH-SIGNAL to terminal
+        def tee_output():
+            try:
+                with open(log_path, "w") as log_file:
+                    for line in proc.stdout:
+                        log_file.write(line)  # ALWAYS to file
+                        log_file.flush()
+                        if is_high_signal(line):  # Only high-signal to terminal
+                            print(line, end="", flush=True)
+            except Exception as e:
+                log("ERROR", f"Tee output failed: {e}")
+
+        threading.Thread(target=tee_output, daemon=True).start()
+
+        log("API", f"Job {job_id[:8]} started, PID={proc.pid}")
 
         # Update lock files with PID (for ownership verification)
         for issue_id in started:
@@ -746,8 +779,6 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 pass  # Best effort
 
         # Record job metadata with enhanced fields
-        jobs_dir = self.artifacts_dir / "jobs"
-        jobs_dir.mkdir(exist_ok=True)
         (jobs_dir / f"{job_id}.json").write_text(json.dumps({
             "job_id": job_id,
             "pid": proc.pid,
@@ -758,7 +789,18 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             "cwd": str(self.repo_root),
             "status": "running",
             "stop_requested_at": None,
+            "log_path": str(log_path),
         }))
+
+        # Return stubs keyed by temp_id (issue_identifier)
+        # UI will upgrade to real run_id when SSE sends run:created
+        run_stubs = []
+        for issue_id in started:
+            run_stubs.append({
+                "temp_id": issue_id,  # KEY: use issue_identifier, not fake run_id
+                "issue_identifier": issue_id,
+                "status": "pending",
+            })
 
         self._send_json({
             "job_id": job_id,
@@ -766,6 +808,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             "started": started,
             "rejected": rejected,
             "reason_by_issue": reason_by_issue,
+            "stubs": run_stubs,  # Renamed from "runs" to be clear these are stubs
         })
 
     def _send_runs_list(self) -> None:

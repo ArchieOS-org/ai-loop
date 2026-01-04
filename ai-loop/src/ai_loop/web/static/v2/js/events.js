@@ -78,18 +78,53 @@ function connectSSE() {
     const data = JSON.parse(e.data);
     console.log('[SSE] Run created:', data.run_id);
 
-    Store.updateRun(data.run_id, {
-      run_id: data.run_id,
-      issue_identifier: data.issue_identifier,
-      issue_title: data.issue_title,
-      status: 'pending',
-      approval_mode: Store.getState().globalApprovalMode,
-      iteration: 0,
-      confidence: null,
-      started_at: new Date().toISOString(),
-      completed_at: null,
-      gate_pending: null,
-    });
+    const state = Store.getState();
+    const issueId = data.issue_identifier;
+
+    // Check for existing stub (temp_id = issue_identifier)
+    const stub = state.runs.get(issueId);
+    if (stub && stub.is_stub) {
+      console.log('[SSE] Reconciling stub:', issueId, '→', data.run_id);
+
+      // Preserve UI state from stub
+      const preservedState = { approval_mode: stub.approval_mode };
+      const wasSelected = state.selectedRunId === issueId;
+
+      // Remove stub, add real run
+      Store.deleteRun(issueId);
+      Store.updateRun(data.run_id, {
+        run_id: data.run_id,
+        issue_identifier: data.issue_identifier,
+        issue_title: data.issue_title,
+        status: data.status || 'pending',
+        ...preservedState,
+        is_stub: false,
+        iteration: 0,
+        confidence: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        gate_pending: null,
+      });
+
+      // Restore selection if stub was selected
+      if (wasSelected) {
+        Store.setState({ selectedRunId: data.run_id });
+      }
+    } else {
+      // No stub, just add the run
+      Store.updateRun(data.run_id, {
+        run_id: data.run_id,
+        issue_identifier: data.issue_identifier,
+        issue_title: data.issue_title,
+        status: 'pending',
+        approval_mode: Store.getState().globalApprovalMode,
+        iteration: 0,
+        confidence: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        gate_pending: null,
+      });
+    }
 
     updateLastEventId(e);
   });
