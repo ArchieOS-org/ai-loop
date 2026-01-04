@@ -34,6 +34,14 @@ class GateResult(str, Enum):
     ERROR = "error"
 
 
+class ApprovalMode(str, Enum):
+    """Mode for human approval at gates."""
+
+    AUTO = "auto"  # Never blocks. Critiques run, results logged. Pipeline continues.
+    GATE_ON_FAIL = "gate_on_fail"  # Blocks only if critique fails or confidence < threshold
+    ALWAYS_GATE = "always_gate"  # Blocks at every gate for human decision
+
+
 @dataclass
 class LinearIssue:
     """Represents a Linear issue."""
@@ -151,6 +159,10 @@ class RunContext:
     no_linear_writeback: bool = False
     verbose: bool = False
 
+    # Approval settings
+    approval_mode: ApprovalMode = ApprovalMode.AUTO
+    human_feedback: str = ""  # Feedback from user at gates
+
     # Runtime state
     status: RunStatus = RunStatus.PENDING
     current_iteration: int = 0
@@ -200,6 +212,7 @@ class RunSummary:
     started_at: datetime | None
     completed_at: datetime | None
     error_message: str = ""
+    approval_mode: ApprovalMode = ApprovalMode.AUTO
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -213,4 +226,5 @@ class RunSummary:
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "error_message": self.error_message,
+            "approval_mode": self.approval_mode.value,
         }

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +11,7 @@ from typing import TYPE_CHECKING, Callable
 
 from ai_loop.core.artifacts import ArtifactManager
 from ai_loop.core.models import (
+    ApprovalMode,
     CritiqueResult,
     GateResult,
     LinearIssue,
@@ -125,6 +128,109 @@ class PipelineOrchestrator:
         recent_hashes = [p.hash for p in ctx.plan_versions[-3:]]
         return len(set(recent_hashes)) == 1
 
+    def _should_block_at_gate(
+        self,
+        ctx: RunContext,
+        critique: CritiqueResult,
+        gate_result: GateResult,
+    ) -> bool:
+        """Determine if we should block for human approval at this gate."""
+        mode = ctx.approval_mode
+
+        if mode == ApprovalMode.AUTO:
+            # Never block
+            return False
+        elif mode == ApprovalMode.ALWAYS_GATE:
+            # Always block
+            return True
+        elif mode == ApprovalMode.GATE_ON_FAIL:
+            # Block only if gate failed
+            return gate_result == GateResult.FAIL
+
+        return False
+
+    async def _wait_for_gate_resolution(
+        self,
+        ctx: RunContext,
+        gate_type: str,
+        critique: CritiqueResult,
+        log: Callable[[str, dict | None], None],
+    ) -> str:
+        """
+        Wait for human resolution at a gate.
+
+        Writes gate_pending.json, polls for gate_resolution.json.
+        Returns the action: 'approve', 'reject', or 'request_changes'.
+        """
+        run_dir = self.artifacts_root / ctx.run_id
+        pending_path = run_dir / "gate_pending.json"
+        resolution_path = run_dir / "gate_resolution.json"
+
+        # Write gate_pending.json
+        pending_data = {
+            "gate_type": gate_type,
+            "created_at": datetime.now().isoformat(),
+            "critique": {
+                "confidence": critique.confidence,
+                "approved": critique.approved,
+                "blockers": critique.blockers,
+                "warnings": critique.warnings,
+                "feedback": critique.feedback,
+            },
+        }
+        pending_path.write_text(json.dumps(pending_data, indent=2))
+
+        # Log the gate pending event (SSE will pick this up)
+        log("gate_pending", {
+            "gate_type": gate_type,
+            "critique": pending_data["critique"],
+        })
+
+        # Poll for resolution (2s initially, 5s after 60s)
+        start_time = datetime.now()
+        timeout = 30 * 60  # 30 minutes
+        poll_interval = 2  # Start with 2s
+
+        while True:
+            elapsed = (datetime.now() - start_time).total_seconds()
+
+            # Check timeout
+            if elapsed > timeout:
+                # Auto-reject on timeout
+                resolution_path.write_text(json.dumps({
+                    "action": "reject",
+                    "feedback": "Timed out (30m)",
+                    "resolved_at": datetime.now().isoformat(),
+                }))
+
+            # Check for resolution file
+            if resolution_path.exists():
+                try:
+                    resolution = json.loads(resolution_path.read_text())
+                    action = resolution.get("action", "reject")
+                    feedback = resolution.get("feedback", "")
+
+                    # Store feedback for next iteration
+                    if feedback:
+                        ctx.human_feedback = feedback
+
+                    # Clean up files
+                    pending_path.unlink(missing_ok=True)
+                    resolution_path.unlink(missing_ok=True)
+
+                    # Log resolution
+                    log("gate_resolved", {"action": action, "feedback": feedback})
+
+                    return action
+                except (json.JSONDecodeError, IOError):
+                    pass
+
+            # Backoff after 60s
+            if elapsed > 60:
+                poll_interval = 5
+
+            await asyncio.sleep(poll_interval)
+
     async def run_pipeline(
         self,
         ctx: RunContext,
@@ -207,6 +313,25 @@ class PipelineOrchestrator:
                 # Check gate
                 gate_result = self._check_gate(critique, ctx.confidence_threshold)
 
+                # Check if we should block for human approval
+                if self._should_block_at_gate(ctx, critique, gate_result):
+                    action = await self._wait_for_gate_resolution(
+                        ctx, "plan_gate", critique, log
+                    )
+
+                    if action == "reject":
+                        ctx.status = RunStatus.FAILED
+                        ctx.error_message = f"Rejected by user: {ctx.human_feedback or 'No feedback'}"
+                        log("pipeline_rejected", {"feedback": ctx.human_feedback})
+                        break
+                    elif action == "approve":
+                        # Override gate result to PASS
+                        gate_result = GateResult.PASS
+                    elif action == "request_changes":
+                        # Force another iteration with feedback
+                        gate_result = GateResult.FAIL
+                        # Feedback already stored in ctx.human_feedback
+
                 if gate_result == GateResult.PASS:
                     ctx.stable_pass_count += 1
                     log("plan_gate_passed", {"stable_count": ctx.stable_pass_count})
@@ -232,12 +357,17 @@ class PipelineOrchestrator:
                 update_status(RunStatus.REFINING)
                 ctx.current_iteration += 1
 
+                # Include human feedback if available
+                human_feedback = ctx.human_feedback
+                ctx.human_feedback = ""  # Clear after use
+
                 refined = await self.claude.refine_plan(
                     safe_issue,
                     ctx.plan_versions[-1].content,
                     critique,
                     ctx.current_iteration - 1,
                     ctx.repo_root,
+                    human_feedback=human_feedback,
                 )
                 plan = PlanVersion(version=ctx.current_iteration, content=refined)
                 ctx.plan_versions.append(plan)
@@ -289,6 +419,22 @@ class PipelineOrchestrator:
 
                     gate_result = self._check_gate(critique, ctx.confidence_threshold)
 
+                    # Check if we should block for human approval
+                    if self._should_block_at_gate(ctx, critique, gate_result):
+                        action = await self._wait_for_gate_resolution(
+                            ctx, "code_gate", critique, log
+                        )
+
+                        if action == "reject":
+                            ctx.status = RunStatus.FAILED
+                            ctx.error_message = f"Rejected by user: {ctx.human_feedback or 'No feedback'}"
+                            log("pipeline_rejected", {"feedback": ctx.human_feedback})
+                            break
+                        elif action == "approve":
+                            gate_result = GateResult.PASS
+                        elif action == "request_changes":
+                            gate_result = GateResult.FAIL
+
                     if gate_result == GateResult.PASS:
                         ctx.status = RunStatus.SUCCESS
                         log("code_gate_passed")
@@ -302,10 +448,15 @@ class PipelineOrchestrator:
                             update_status(RunStatus.FIXING)
                             log("fixing_started", {"iteration": fix_iteration})
 
+                            # Include human feedback if available
+                            human_feedback = ctx.human_feedback
+                            ctx.human_feedback = ""
+
                             fix_log = await self.claude.fix_code(
                                 ctx.final_plan,
                                 critique,
                                 ctx,
+                                human_feedback=human_feedback,
                             )
                             self.artifacts.write_fix_log(ctx, fix_iteration, fix_log)
                             log("fix_applied", {"iteration": fix_iteration})

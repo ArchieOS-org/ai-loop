@@ -80,6 +80,7 @@ class ClaudeRunner:
         critique: CritiqueResult,
         version: int,
         repo_root: Path,
+        human_feedback: str = "",
     ) -> str:
         """Refine plan based on critique feedback."""
         template = self._load_prompt("claude_refiner")
@@ -107,6 +108,16 @@ class ClaudeRunner:
 - Consistency with Patterns: {critique.rubric_breakdown.consistency_with_patterns}/100
 """
 
+        # Add human feedback section if present
+        human_feedback_section = ""
+        if human_feedback:
+            human_feedback_section = f"""
+---
+
+## Human Feedback
+{human_feedback}
+"""
+
         prompt = f"""{template}
 
 ---
@@ -122,6 +133,7 @@ class ClaudeRunner:
 ---
 
 {critique_text}
+{human_feedback_section}
 """
         stdout, _ = await self._run_claude(prompt, cwd=repo_root, timeout=600)
         return stdout
@@ -160,6 +172,7 @@ class ClaudeRunner:
         final_plan: str,
         critique: CritiqueResult,
         ctx: RunContext,
+        human_feedback: str = "",
     ) -> str:
         """Fix code based on CODE_GATE critique."""
         template = self._load_prompt("claude_implementer")
@@ -167,6 +180,16 @@ class ClaudeRunner:
 
         blockers_text = "\n".join(f"- {b}" for b in critique.blockers)
         warnings_text = "\n".join(f"- {w}" for w in critique.warnings)
+
+        # Add human feedback section if present
+        human_feedback_section = ""
+        if human_feedback:
+            human_feedback_section = f"""
+---
+
+## Human Feedback
+{human_feedback}
+"""
 
         prompt = f"""{template}
 
@@ -185,7 +208,7 @@ class ClaudeRunner:
 
 ## Detailed Feedback
 {critique.feedback}
-
+{human_feedback_section}
 ---
 
 ## Instructions

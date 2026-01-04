@@ -9,11 +9,21 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 from datetime import datetime
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
+from socketserver import ThreadingMixIn
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """HTTP server that handles each request in a separate thread."""
+    daemon_threads = True
+
+# UI version flag (default v1, set via --ui-version or AI_LOOP_UI_VERSION env)
+UI_VERSION = os.environ.get("AI_LOOP_UI_VERSION", "v1")
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
@@ -26,10 +36,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     csrf_token: str = ""
     port: int = 8080
 
+    # Static directory for serving files
+    _static_dir: str = ""
+
     def __init__(self, *args, **kwargs):
-        # Set static directory
-        self.directory = str(Path(__file__).parent / "static")
-        super().__init__(*args, **kwargs)
+        # Set static dir before super().__init__ can set self.directory to cwd
+        if not DashboardHandler._static_dir:
+            DashboardHandler._static_dir = str(Path(__file__).parent / "static")
+        super().__init__(*args, directory=DashboardHandler._static_dir, **kwargs)
 
     def _check_host(self) -> bool:
         """Strict host check - exact match only."""
@@ -87,6 +101,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/" or self.path == "/index.html":
             self._send_index_with_token()
+        elif self.path.startswith("/api/events"):
+            self._handle_sse()
         elif self.path.startswith("/api/issues"):
             self._send_issues_list()
         elif self.path == "/api/jobs":
@@ -124,10 +140,20 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         elif self.path.startswith("/api/runs/") and self.path.endswith("/unhide"):
             run_id = self.path.split("/")[-2]
             self._unhide_run(run_id)
+        elif self.path.startswith("/api/runs/") and self.path.endswith("/feedback"):
+            run_id = self.path.split("/")[-2]
+            self._submit_feedback(run_id)
+        elif self.path.startswith("/api/runs/") and self.path.endswith("/config"):
+            run_id = self.path.split("/")[-2]
+            self._update_run_config(run_id)
 
     def _send_index_with_token(self) -> None:
         """Serve index.html with CSRF token injected."""
-        index_path = Path(__file__).parent / "static" / "index.html"
+        # Route to v2 if UI_VERSION is set
+        if UI_VERSION == "v2":
+            index_path = Path(__file__).parent / "static" / "v2" / "index.html"
+        else:
+            index_path = Path(__file__).parent / "static" / "index.html"
         html = index_path.read_text()
         # Inject token and mode
         html = html.replace("{{CSRF_TOKEN}}", self.csrf_token)
@@ -148,6 +174,288 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
+
+    def _handle_sse(self) -> None:
+        """GET /api/events - Server-Sent Events stream.
+
+        Tails trace.jsonl files for active runs.
+        Supports replay via ?since=run_id:line_number
+        """
+        params = parse_qs(urlparse(self.path).query)
+        since = params.get("since", [None])[0]
+
+        # Parse replay position
+        replay_positions: dict[str, int] = {}
+        if since:
+            for pos in since.split(","):
+                if ":" in pos:
+                    run_id, line_str = pos.rsplit(":", 1)
+                    try:
+                        replay_positions[run_id] = int(line_str)
+                    except ValueError:
+                        pass
+
+        # Send SSE headers
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        # Track file positions for tailing
+        file_positions: dict[str, int] = {}
+        last_heartbeat = time.time()
+        last_scan = 0.0
+
+        # Send init event with current state
+        init_data = self._build_sse_init()
+        self._send_sse_event("init", init_data)
+
+        try:
+            while True:
+                now = time.time()
+
+                # Periodic scan for new run directories (every 10s)
+                if now - last_scan > 10:
+                    self._scan_for_new_runs(file_positions)
+                    last_scan = now
+
+                # Tail all active trace files
+                events_sent = 0
+                for run_id, position in list(file_positions.items()):
+                    trace_path = self.artifacts_dir / run_id / "trace.jsonl"
+                    if not trace_path.exists():
+                        continue
+
+                    try:
+                        with open(trace_path, "r") as f:
+                            f.seek(position)
+                            while True:
+                                line = f.readline()
+                                if not line:
+                                    break
+                                line = line.strip()
+                                if not line:
+                                    continue
+
+                                # Skip if replaying and before replay position
+                                current_line = file_positions.get(f"{run_id}_line", 0) + 1
+                                file_positions[f"{run_id}_line"] = current_line
+                                if run_id in replay_positions and current_line <= replay_positions[run_id]:
+                                    continue
+
+                                try:
+                                    event = json.loads(line)
+                                    sse_event = self._trace_event_to_sse(run_id, event)
+                                    if sse_event:
+                                        event_type, event_data = sse_event
+                                        event_data["_line"] = current_line
+                                        self._send_sse_event(event_type, event_data, f"{run_id}:{current_line}")
+                                        events_sent += 1
+                                except json.JSONDecodeError:
+                                    continue
+
+                            file_positions[run_id] = f.tell()
+                    except IOError:
+                        continue
+
+                    # Throttle: max 100 events per flush cycle
+                    if events_sent >= 100:
+                        break
+
+                # Heartbeat every 30s
+                if now - last_heartbeat > 30:
+                    self._send_sse_event("heartbeat", {})
+                    last_heartbeat = now
+
+                # Flush and sleep (100ms flush frequency)
+                self.wfile.flush()
+                time.sleep(0.1)
+
+        except (BrokenPipeError, ConnectionResetError):
+            # Client disconnected
+            pass
+
+    def _build_sse_init(self) -> dict:
+        """Build initial state for SSE init event."""
+        runs = []
+        if self.artifacts_dir.exists():
+            for run_dir in sorted(self.artifacts_dir.iterdir(), reverse=True):
+                if not run_dir.is_dir():
+                    continue
+                summary_path = run_dir / "summary.json"
+                if not summary_path.exists():
+                    continue
+                try:
+                    data = json.loads(summary_path.read_text())
+                    if data.get("hidden_at"):
+                        continue
+                    # Map to run shape expected by UI
+                    runs.append({
+                        "run_id": data.get("run_id", run_dir.name),
+                        "issue_identifier": data.get("issue_identifier", ""),
+                        "issue_title": data.get("issue_title", ""),
+                        "status": data.get("status", "unknown"),
+                        "approval_mode": data.get("approval_mode", "auto"),
+                        "iteration": data.get("iteration", 0),
+                        "confidence": data.get("confidence"),
+                        "started_at": data.get("started_at"),
+                        "completed_at": data.get("completed_at"),
+                        "gate_pending": self._get_gate_pending(run_dir),
+                    })
+                except (json.JSONDecodeError, IOError):
+                    continue
+
+        return {
+            "mode": "write_enabled" if self.enable_writes else "dry_run",
+            "runs": runs[:100],  # Max 100 runs in init
+        }
+
+    def _get_gate_pending(self, run_dir: Path) -> dict | None:
+        """Check if a gate is pending for a run."""
+        gate_path = run_dir / "gate_pending.json"
+        if gate_path.exists():
+            try:
+                return json.loads(gate_path.read_text())
+            except (json.JSONDecodeError, IOError):
+                pass
+        return None
+
+    def _scan_for_new_runs(self, file_positions: dict[str, int]) -> None:
+        """Scan artifacts dir for new run directories to tail."""
+        if not self.artifacts_dir.exists():
+            return
+
+        for run_dir in self.artifacts_dir.iterdir():
+            if not run_dir.is_dir():
+                continue
+            run_id = run_dir.name
+            if run_id in file_positions:
+                continue
+            trace_path = run_dir / "trace.jsonl"
+            if trace_path.exists():
+                # Start tailing from current end
+                file_positions[run_id] = trace_path.stat().st_size
+                file_positions[f"{run_id}_line"] = sum(1 for _ in open(trace_path))
+
+    def _trace_event_to_sse(self, run_id: str, event: dict) -> tuple[str, dict] | None:
+        """Convert a trace event to an SSE event type and data."""
+        event_type = event.get("event_type", event.get("type", ""))
+
+        if event_type == "run_started":
+            return ("run:created", {
+                "run_id": run_id,
+                "issue_identifier": event.get("issue_identifier", ""),
+                "issue_title": event.get("issue_title", ""),
+            })
+        elif event_type == "status_change":
+            return ("run:status", {
+                "run_id": run_id,
+                "status": event.get("status", ""),
+                "iteration": event.get("iteration"),
+                "confidence": event.get("confidence"),
+            })
+        elif event_type in ("stdout", "stderr", "output"):
+            return ("run:output", {
+                "run_id": run_id,
+                "content": event.get("content", event.get("data", "")),
+                "stream": event_type if event_type in ("stdout", "stderr") else "stdout",
+            })
+        elif event_type == "run_completed":
+            return ("run:completed", {
+                "run_id": run_id,
+                "status": event.get("status", "completed"),
+                "final_confidence": event.get("confidence"),
+            })
+        elif event_type == "gate_pending":
+            return ("gate:pending", {
+                "run_id": run_id,
+                "gate_type": event.get("gate_type", ""),
+                "critique": event.get("critique", {}),
+            })
+        elif event_type == "gate_resolved":
+            return ("gate:resolved", {
+                "run_id": run_id,
+                "action": event.get("action", ""),
+                "feedback": event.get("feedback", ""),
+            })
+        elif event_type == "error":
+            return ("run:error", {
+                "run_id": run_id,
+                "error": event.get("error", event.get("message", "")),
+            })
+
+        return None
+
+    def _send_sse_event(self, event_type: str, data: dict, event_id: str | None = None) -> None:
+        """Send a single SSE event."""
+        try:
+            if event_id:
+                self.wfile.write(f"id: {event_id}\n".encode())
+            self.wfile.write(f"event: {event_type}\n".encode())
+            self.wfile.write(f"data: {json.dumps(data)}\n\n".encode())
+        except (BrokenPipeError, ConnectionResetError):
+            raise
+
+    def _submit_feedback(self, run_id: str) -> None:
+        """POST /api/runs/{id}/feedback - submit gate resolution."""
+        run_dir = self.artifacts_dir / run_id
+        if not run_dir.exists():
+            self._send_json({"error": "Run not found"}, 404)
+            return
+
+        gate_pending = run_dir / "gate_pending.json"
+        if not gate_pending.exists():
+            self._send_json({"error": "No gate pending"}, 400)
+            return
+
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(content_length))
+
+        action = body.get("action")
+        if action not in ("approve", "reject", "request_changes"):
+            self._send_json({"error": "Invalid action"}, 400)
+            return
+
+        feedback = body.get("feedback", "")
+
+        # Write resolution file
+        resolution = {
+            "action": action,
+            "feedback": feedback,
+            "resolved_at": datetime.now().isoformat(),
+        }
+        resolution_path = run_dir / "gate_resolution.json"
+        resolution_path.write_text(json.dumps(resolution, indent=2))
+
+        self._send_json({"resolved": True, "run_id": run_id, "action": action})
+
+    def _update_run_config(self, run_id: str) -> None:
+        """POST /api/runs/{id}/config - update run configuration."""
+        run_dir = self.artifacts_dir / run_id
+        summary_path = run_dir / "summary.json"
+
+        if not summary_path.exists():
+            self._send_json({"error": "Run not found"}, 404)
+            return
+
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(content_length))
+
+        approval_mode = body.get("approval_mode")
+        if approval_mode and approval_mode not in ("auto", "gate_on_fail", "always_gate"):
+            self._send_json({"error": "Invalid approval_mode"}, 400)
+            return
+
+        try:
+            summary = json.loads(summary_path.read_text())
+            if approval_mode:
+                summary["approval_mode"] = approval_mode
+            summary_path.write_text(json.dumps(summary, indent=2))
+            self._send_json({"updated": True, "run_id": run_id, "approval_mode": approval_mode})
+        except Exception as e:
+            self._send_json({"error": str(e)}, 500)
 
     def _send_issues_list(self) -> None:
         """GET /api/issues - list issues from Linear."""
@@ -540,11 +848,27 @@ def start_server(port: int, artifacts_dir: Path) -> threading.Thread:
     """Start dashboard server in background thread."""
     DashboardHandler.artifacts_dir = artifacts_dir
 
-    server = HTTPServer(("", port), DashboardHandler)
+    server = ThreadingHTTPServer(("", port), DashboardHandler)
 
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return thread
+
+
+def _ensure_static_permissions(static_dir: Path) -> None:
+    """Ensure static assets are world-readable. Self-heals bad permissions."""
+    fixed = 0
+    for path in static_dir.rglob("*"):
+        if path.is_file():
+            if not os.access(path, os.R_OK) or (path.stat().st_mode & 0o444) != 0o444:
+                path.chmod(0o644)
+                fixed += 1
+        elif path.is_dir():
+            if (path.stat().st_mode & 0o555) != 0o555:
+                path.chmod(0o755)
+                fixed += 1
+    if fixed:
+        print(f"  Fixed {fixed} static asset permissions")
 
 
 def run_server(
@@ -558,6 +882,10 @@ def run_server(
     print("\n=== AI Loop Dashboard ===")
     print(f"Repo root: {repo_root}")
     print(f"Artifacts: {artifacts_dir}")
+
+    # Ensure static files are readable (self-healing for bad perms)
+    static_dir = Path(__file__).parent / "static"
+    _ensure_static_permissions(static_dir)
 
     linear_key = os.environ.get("LINEAR_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
@@ -584,7 +912,7 @@ def run_server(
     DashboardHandler.port = port
 
     # Bind to loopback only for security
-    server = HTTPServer(("127.0.0.1", port), DashboardHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", port), DashboardHandler)
     mode_str = "WRITE ENABLED" if enable_writes else "dry-run only"
     print(f"Dashboard: http://127.0.0.1:{port}")
     print(f"Mode: {mode_str}")

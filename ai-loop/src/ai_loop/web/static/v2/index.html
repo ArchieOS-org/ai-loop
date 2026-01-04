@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Loop</title>
+  <link rel="stylesheet" href="/v2/css/tokens.css">
+  <link rel="stylesheet" href="/v2/css/components.css">
+  <link rel="stylesheet" href="/v2/css/utilities.css">
+</head>
+<body>
+  <!-- Hidden CSRF token -->
+  <input type="hidden" id="csrf-token" value="{{CSRF_TOKEN}}">
+  <input type="hidden" id="ui-mode" value="{{MODE}}">
+
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header__left">
+        <h1 class="header__logo">AI Loop</h1>
+      </div>
+      <div class="header__controls">
+        <div class="header__approval">
+          <label class="text-xs text-secondary uppercase" for="global-approval">Default</label>
+          <select id="global-approval" class="select">
+            <option value="auto">Auto-approve</option>
+            <option value="gate_on_fail">Gate on fail</option>
+            <option value="always_gate">Always gate</option>
+          </select>
+        </div>
+        <div class="connection-status" id="connection-status">
+          <span class="connection-status__dot"></span>
+          <span class="connection-status__text">Connecting...</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Left Panel: Run List -->
+      <aside class="split-pane__left" id="left-panel">
+        <!-- Issue Picker -->
+        <div class="issue-picker" id="issue-picker">
+          <div class="issue-picker-header" id="issue-picker-toggle">
+            <span class="issue-picker-title">New Run</span>
+            <span class="issue-picker-chevron">▼</span>
+          </div>
+          <div class="issue-picker-content" id="issue-picker-content">
+            <div class="issue-filters">
+              <input type="text" id="team-filter" class="input input-sm" placeholder="Team" value="Dispatch">
+              <input type="text" id="project-filter" class="input input-sm" placeholder="Project">
+              <select id="state-filter" class="select select-sm">
+                <option value="Todo">Todo</option>
+                <option value="In Progress">In Progress</option>
+                <option value="Backlog">Backlog</option>
+              </select>
+              <button class="btn btn-sm btn-ghost" id="refresh-issues">↻</button>
+            </div>
+            <div class="issue-list" id="issue-list">
+              <div class="issue-list-empty">Click ↻ to load issues</div>
+            </div>
+            <div class="issue-actions">
+              <div class="issue-select-actions">
+                <button class="btn btn-xs btn-ghost" id="select-all">All</button>
+                <button class="btn btn-xs btn-ghost" id="clear-selection">Clear</button>
+              </div>
+              <button class="btn btn-sm btn-primary" id="start-runs" disabled>Start</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="run-list" id="run-list">
+          <!-- Active runs -->
+          <div class="run-group" id="active-runs">
+            <h3 class="run-group__title">Active</h3>
+            <div class="run-group__items" id="active-runs-items">
+              <!-- RunCards inserted here -->
+            </div>
+          </div>
+
+          <!-- Pending runs -->
+          <div class="run-group" id="pending-runs">
+            <h3 class="run-group__title">Pending</h3>
+            <div class="run-group__items" id="pending-runs-items">
+              <!-- RunCards inserted here -->
+            </div>
+          </div>
+
+          <!-- Completed runs -->
+          <div class="run-group" id="completed-runs">
+            <h3 class="run-group__title">History</h3>
+            <div class="run-group__items" id="completed-runs-items">
+              <!-- RunCards inserted here -->
+            </div>
+          </div>
+
+          <!-- Empty state -->
+          <div class="empty-state hidden" id="empty-state">
+            <p class="text-secondary">No runs yet</p>
+            <p class="text-xs text-tertiary">Start a batch from the CLI</p>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Resizer -->
+      <div class="split-pane__resizer" id="resizer"></div>
+
+      <!-- Right Panel: Detail View -->
+      <section class="split-pane__right" id="right-panel">
+        <!-- Tab bar -->
+        <div class="tab-bar">
+          <button class="tab active" data-tab="output">Output</button>
+          <button class="tab" data-tab="files">Files</button>
+          <button class="tab" data-tab="critique">Critique</button>
+        </div>
+
+        <!-- Content area -->
+        <div class="split-pane__content">
+          <!-- Output tab -->
+          <div class="tab-panel active" id="tab-output">
+            <div class="output-stream" id="output-stream">
+              <pre class="output-stream__content" id="output-pre">Select a run to view output...</pre>
+            </div>
+          </div>
+
+          <!-- Files tab -->
+          <div class="tab-panel hidden" id="tab-files">
+            <div class="files-viewer" id="files-viewer">
+              <p class="text-secondary p-4">File changes will appear here</p>
+            </div>
+          </div>
+
+          <!-- Critique tab -->
+          <div class="tab-panel hidden" id="tab-critique">
+            <div class="critique-viewer" id="critique-viewer">
+              <p class="text-secondary p-4">Critique results will appear here</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Feedback bar (shown at gates) -->
+        <div class="feedback-bar hidden" id="feedback-bar">
+          <div class="feedback-bar__wrap">
+            <textarea
+              class="feedback-bar__input"
+              id="feedback-input"
+              placeholder="Add feedback for the agent..."
+              rows="2"
+            ></textarea>
+          </div>
+          <div class="feedback-bar__actions">
+            <button class="btn btn-danger" id="btn-reject">Reject</button>
+            <button class="btn btn-secondary" id="btn-request-changes">Request Changes</button>
+            <button class="btn btn-primary" id="btn-approve">Approve</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Mobile tab bar -->
+    <nav class="mobile-tabs" id="mobile-tabs">
+      <button class="mobile-tabs__btn active" data-panel="list">Runs</button>
+      <button class="mobile-tabs__btn" data-panel="detail">Detail</button>
+    </nav>
+  </div>
+
+  <!-- Scripts -->
+  <script src="/v2/js/store.js"></script>
+  <script src="/v2/js/events.js"></script>
+  <script src="/v2/js/components.js"></script>
+  <script src="/v2/js/app.js"></script>
+</body>
+</html>
