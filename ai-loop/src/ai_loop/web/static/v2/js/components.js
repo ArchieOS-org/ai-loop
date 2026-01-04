@@ -671,6 +671,205 @@ function setupIssuePicker() {
   loadIssues();
 }
 
+/**
+ * Setup project picker functionality
+ */
+function setupProjectPicker() {
+  const trigger = document.getElementById('project-trigger');
+  const dropdown = document.getElementById('project-dropdown');
+  const addBtn = document.getElementById('add-project-btn');
+  const recentsContainer = document.getElementById('project-recents');
+  const projectNameEl = document.getElementById('project-name');
+
+  // Modal elements
+  const modal = document.getElementById('add-project-modal');
+  const modalBackdrop = modal?.querySelector('.modal__backdrop');
+  const pathInput = document.getElementById('path-input');
+  const pathError = document.getElementById('path-error');
+  const cancelBtn = document.getElementById('add-cancel');
+  const confirmBtn = document.getElementById('add-confirm');
+
+  if (!trigger || !dropdown) {
+    console.warn('[ProjectPicker] Missing elements');
+    return;
+  }
+
+  // Toggle dropdown
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    dropdown.classList.toggle('hidden');
+  });
+
+  // Close on outside click
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.project-picker')) {
+      dropdown.classList.add('hidden');
+    }
+  });
+
+  // Add project opens modal
+  addBtn?.addEventListener('click', () => {
+    dropdown.classList.add('hidden');
+    openAddProjectModal();
+  });
+
+  function openAddProjectModal() {
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    pathInput.value = '';
+    pathError.classList.add('hidden');
+    pathError.textContent = '';
+    setTimeout(() => pathInput.focus(), 50);
+  }
+
+  function closeAddProjectModal() {
+    modal?.classList.add('hidden');
+  }
+
+  // Modal close handlers
+  cancelBtn?.addEventListener('click', closeAddProjectModal);
+  modalBackdrop?.addEventListener('click', closeAddProjectModal);
+
+  // Escape key closes modal
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modal && !modal.classList.contains('hidden')) {
+      closeAddProjectModal();
+    }
+  });
+
+  // Enter key in path input triggers confirm
+  pathInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      confirmBtn?.click();
+    }
+  });
+
+  // Confirm add project
+  confirmBtn?.addEventListener('click', async () => {
+    const path = pathInput.value.trim();
+    if (!path) {
+      pathError.textContent = 'Please enter a path';
+      pathError.classList.remove('hidden');
+      return;
+    }
+
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Opening...';
+
+    const result = await switchProject(path);
+
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = 'Open';
+
+    if (result.success) {
+      closeAddProjectModal();
+    } else {
+      pathError.textContent = result.error || 'Failed to switch project';
+      pathError.classList.remove('hidden');
+    }
+  });
+
+  // Load current project
+  async function loadCurrentProject() {
+    try {
+      const res = await fetch('/api/projects/current');
+      const data = await res.json();
+      if (data.name) {
+        projectNameEl.textContent = data.name;
+        Store.setState({ currentProject: data });
+      }
+    } catch (e) {
+      console.error('[ProjectPicker] Failed to load current project:', e);
+    }
+  }
+
+  // Load recent projects
+  async function loadRecentProjects() {
+    try {
+      const res = await fetch('/api/projects');
+      const data = await res.json();
+      const projects = data.projects || [];
+
+      if (projects.length === 0) {
+        recentsContainer.innerHTML = '<div class="project-picker__empty">No recent projects</div>';
+        return;
+      }
+
+      recentsContainer.innerHTML = projects.map(p => `
+        <button class="project-picker__item" data-path="${escapeHtml(p.path)}">
+          <span class="project-picker__item-name">${escapeHtml(p.name)}</span>
+          <span class="project-picker__item-path">${escapeHtml(p.path)}</span>
+        </button>
+      `).join('');
+
+      // Add click handlers
+      recentsContainer.querySelectorAll('.project-picker__item').forEach(item => {
+        item.addEventListener('click', async () => {
+          dropdown.classList.add('hidden');
+          const path = item.dataset.path;
+          await switchProject(path);
+        });
+      });
+    } catch (e) {
+      console.error('[ProjectPicker] Failed to load recent projects:', e);
+    }
+  }
+
+  // Switch project (with 409 handling)
+  async function switchProject(path) {
+    const csrfToken = document.getElementById('csrf-token')?.value || '';
+
+    try {
+      const res = await fetch('/api/projects/switch', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+        },
+        body: JSON.stringify({ path }),
+      });
+
+      const data = await res.json();
+
+      if (res.status === 409) {
+        // Jobs running - can't switch
+        showNotification(data.error || 'Stop runs to switch projects', 'warning');
+        return { success: false, error: data.error };
+      }
+
+      if (res.status === 400 || res.status === 404) {
+        return { success: false, error: data.error || 'Invalid path' };
+      }
+
+      if (!res.ok) {
+        return { success: false, error: data.error || 'Switch failed' };
+      }
+
+      // Success - update UI
+      projectNameEl.textContent = data.project.name;
+      Store.setState({ currentProject: data.project, runs: new Map() });
+
+      // Reconnect SSE to new project
+      if (window.SSE) {
+        SSE.disconnect();
+        SSE.connect();
+      }
+
+      showNotification(`Switched to ${data.project.name}`, 'success');
+      loadRecentProjects();
+
+      return { success: true };
+    } catch (e) {
+      console.error('[ProjectPicker] Switch error:', e);
+      return { success: false, error: 'Network error' };
+    }
+  }
+
+  // Init
+  loadCurrentProject();
+  loadRecentProjects();
+}
+
 // Export components
 window.Components = {
   createRunCard,
@@ -686,4 +885,5 @@ window.Components = {
   setupFeedbackBar,
   setupGlobalApproval,
   setupIssuePicker,
+  setupProjectPicker,
 };

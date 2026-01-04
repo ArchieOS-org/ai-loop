@@ -20,6 +20,97 @@ from urllib.parse import parse_qs, urlparse
 from ai_loop.core.logging import is_high_signal, log
 
 
+# ---------------------------------------------------------------------------
+# ProjectManager: Manages recent projects and last-used persistence
+# ---------------------------------------------------------------------------
+
+def _get_app_dir() -> Path:
+    """Get platform-appropriate app config directory."""
+    # Prefer XDG on Linux, ~/Library/Application Support on macOS, etc.
+    if os.name == "nt":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    elif os.name == "posix" and "darwin" in os.uname().sysname.lower():
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return base / "ai-loop"
+
+
+class ProjectManager:
+    """Manages known projects and current selection."""
+
+    def __init__(self):
+        self.config_path = _get_app_dir() / "projects.json"
+        self.config = self._load_config()
+
+    def _load_config(self) -> dict:
+        """Load or create config with recent projects."""
+        if self.config_path.exists():
+            try:
+                return json.loads(self.config_path.read_text())
+            except (json.JSONDecodeError, IOError):
+                pass
+        return {"recent_projects": [], "last_project": None}
+
+    def _save_config(self) -> None:
+        """Persist config to disk."""
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text(json.dumps(self.config, indent=2))
+
+    def get_recent_projects(self) -> list[dict]:
+        """Return recent projects with metadata (filtered to existing paths)."""
+        valid = []
+        for p in self.config.get("recent_projects", []):
+            path = Path(p.get("path", ""))
+            if path.exists() and (path / ".git").exists():
+                valid.append(p)
+        return valid[:10]  # Max 10 recents
+
+    def add_project(self, path: Path) -> dict:
+        """Add/update a project in recents."""
+        path_str = str(path.resolve())
+        entry = {
+            "path": path_str,
+            "name": path.name,
+            "last_used": datetime.now().isoformat(),
+        }
+
+        # Remove existing entry for this path
+        self.config["recent_projects"] = [
+            p for p in self.config.get("recent_projects", [])
+            if p.get("path") != path_str
+        ]
+
+        # Add to front
+        self.config["recent_projects"].insert(0, entry)
+        self.config["recent_projects"] = self.config["recent_projects"][:10]
+        self.config["last_project"] = path_str
+
+        self._save_config()
+        return entry
+
+    def get_last_project(self) -> Path | None:
+        """Get the last used project path."""
+        last = self.config.get("last_project")
+        if last:
+            p = Path(last)
+            if p.exists() and (p / ".git").exists():
+                return p
+        return None
+
+
+# Singleton project manager instance
+_project_manager: ProjectManager | None = None
+
+
+def get_project_manager() -> ProjectManager:
+    """Get or create the singleton ProjectManager."""
+    global _project_manager
+    if _project_manager is None:
+        _project_manager = ProjectManager()
+    return _project_manager
+
+
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     """HTTP server that handles each request in a separate thread."""
     daemon_threads = True
@@ -118,6 +209,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 # /api/runs/{run_id}
                 run_id = parsed.path.split("/")[-1]
                 self._send_run_detail(run_id)
+        elif self.path == "/api/projects":
+            self._send_projects_list()
+        elif self.path == "/api/projects/current":
+            self._send_current_project()
         else:
             super().do_GET()
 
@@ -148,6 +243,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         elif self.path.startswith("/api/runs/") and self.path.endswith("/config"):
             run_id = self.path.split("/")[-2]
             self._update_run_config(run_id)
+        elif self.path == "/api/projects/switch":
+            self._switch_project()
 
     def _send_index_with_token(self) -> None:
         """Serve index.html with CSRF token injected."""
@@ -882,6 +979,102 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             "latest_critique_path": critique_path,
         })
 
+    # ---------------------------------------------------------------------------
+    # Project Management API
+    # ---------------------------------------------------------------------------
+
+    def _send_projects_list(self) -> None:
+        """GET /api/projects - list recent projects."""
+        pm = get_project_manager()
+        projects = pm.get_recent_projects()
+        self._send_json({"projects": projects})
+
+    def _send_current_project(self) -> None:
+        """GET /api/projects/current - get current project info."""
+        self._send_json({
+            "path": str(self.repo_root),
+            "name": self.repo_root.name,
+            "artifacts_dir": str(self.artifacts_dir),
+        })
+
+    def _get_active_jobs(self) -> list[dict]:
+        """Get list of currently running jobs."""
+        jobs = []
+        jobs_dir = self.artifacts_dir / "jobs"
+        if not jobs_dir.exists():
+            return jobs
+
+        for job_file in jobs_dir.glob("*.json"):
+            try:
+                data = json.loads(job_file.read_text())
+                pid = data.get("pid")
+                cmd = data.get("cmd", [])
+
+                # Only include if process is actually running
+                if self._verify_pid(pid, cmd):
+                    jobs.append(data)
+            except (json.JSONDecodeError, IOError):
+                continue
+
+        return jobs
+
+    def _switch_project(self) -> None:
+        """POST /api/projects/switch - switch current project context.
+
+        Hard contract:
+        - Returns 409 if any job is running
+        - Returns 200 with project info + reconnect flag on success
+        """
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(content_length)) if content_length else {}
+
+        new_path_str = body.get("path", "")
+        if not new_path_str:
+            self._send_json({"error": "path required"}, 400)
+            return
+
+        new_path = Path(new_path_str)
+
+        # Validate: exists, is directory
+        if not new_path.exists() or not new_path.is_dir():
+            self._send_json({"error": "Directory not found"}, 404)
+            return
+
+        # Validate: is git repo
+        if not (new_path / ".git").is_dir():
+            self._send_json({"error": "Not a git repository"}, 400)
+            return
+
+        # Hard contract: refuse if any job is running
+        active_jobs = self._get_active_jobs()
+        if active_jobs:
+            job_ids = [j.get("job_id", "unknown")[:8] for j in active_jobs]
+            self._send_json({
+                "error": "Stop runs to switch projects",
+                "active_jobs": job_ids,
+            }, 409)
+            return
+
+        # Resolve and switch
+        new_path = new_path.resolve()
+
+        # Update class-level config (affects all handlers)
+        DashboardHandler.repo_root = new_path
+        DashboardHandler.artifacts_dir = new_path / "artifacts"
+        DashboardHandler.artifacts_dir.mkdir(exist_ok=True)
+
+        # Persist to config
+        pm = get_project_manager()
+        entry = pm.add_project(new_path)
+
+        log("API", f"Switched project to: {new_path}")
+
+        self._send_json({
+            "project": entry,
+            "artifacts_dir": str(DashboardHandler.artifacts_dir),
+            "reconnect": True,
+        })
+
     def log_message(self, format: str, *args) -> None:
         """Suppress request logging."""
         pass
@@ -912,6 +1105,44 @@ def _ensure_static_permissions(static_dir: Path) -> None:
                 fixed += 1
     if fixed:
         print(f"  Fixed {fixed} static asset permissions")
+
+
+def _kill_port_process(port: int) -> None:
+    """Kill any existing process using the given port."""
+    import platform
+
+    try:
+        if platform.system() == "Darwin" or platform.system() == "Linux":
+            # Use lsof to find process on port, then kill it
+            result = subprocess.run(
+                ["lsof", "-ti", f":{port}"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                pids = result.stdout.strip().split("\n")
+                for pid in pids:
+                    if pid:
+                        try:
+                            os.kill(int(pid), signal.SIGTERM)
+                            time.sleep(0.1)  # Brief wait for cleanup
+                        except (ProcessLookupError, ValueError):
+                            pass
+        elif platform.system() == "Windows":
+            # Windows: use netstat and taskkill
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True,
+                text=True,
+            )
+            for line in result.stdout.split("\n"):
+                if f":{port}" in line and "LISTENING" in line:
+                    parts = line.split()
+                    if parts:
+                        pid = parts[-1]
+                        subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+    except Exception:
+        pass  # Best effort - if it fails, socket bind will raise anyway
 
 
 def run_server(
@@ -953,6 +1184,9 @@ def run_server(
     DashboardHandler.enable_writes = enable_writes
     DashboardHandler.csrf_token = secrets.token_hex(16)
     DashboardHandler.port = port
+
+    # Kill any existing process on this port
+    _kill_port_process(port)
 
     # Bind to loopback only for security
     server = ThreadingHTTPServer(("127.0.0.1", port), DashboardHandler)

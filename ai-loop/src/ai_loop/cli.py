@@ -407,6 +407,7 @@ def list_runs() -> None:
 @app.command()
 def serve(
     port: Annotated[int, typer.Option("--port", "-p", help="Server port")] = 8080,
+    project: Annotated[Optional[Path], typer.Option("--project", help="Project directory (default: current git repo or last used)")] = None,
     open_browser: Annotated[bool, typer.Option("--open", help="Open browser")] = False,
     enable_writes: Annotated[bool, typer.Option("--enable-writes", help="Allow real implementations (not just dry-run)")] = False,
 ) -> None:
@@ -414,14 +415,45 @@ def serve(
 
     By default, web-triggered runs are dry-run only (safe).
     Use --enable-writes to allow real branch creation and implementation.
+
+    Project selection fallback chain:
+    1. --project flag if provided
+    2. Current git repository (if running from one)
+    3. Last used project from ~/.ai-loop/projects.json
     """
     from ai_loop.integrations.git_tools import GitTools
-    from ai_loop.web.server import run_server
+    from ai_loop.web.server import run_server, ProjectManager
 
-    git = GitTools()
-    repo_root = git.get_repo_root()
+    pm = ProjectManager()
+
+    # Fallback chain: --project → current git repo → last used
+    if project:
+        repo_root = project.resolve()
+        if not repo_root.exists():
+            console.print(f"[red]Error: Project path does not exist: {repo_root}[/red]")
+            raise typer.Exit(1)
+    else:
+        try:
+            git = GitTools()
+            repo_root = git.get_repo_root()
+        except Exception:
+            # Not in a git repo, try last used project
+            repo_root = pm.get_last_project()
+            if not repo_root:
+                console.print("[red]Error: No project found.[/red]")
+                console.print("Run from a git repository or use --project /path/to/repo")
+                raise typer.Exit(1)
+
+    # Record this project as most recently used
+    pm.add_project(repo_root)
+
     artifacts_dir = repo_root / "artifacts"
     artifacts_dir.mkdir(exist_ok=True)
+
+    console.print(f"[bold]Starting AI Loop dashboard[/bold]")
+    console.print(f"  Project: {repo_root}")
+    console.print(f"  URL: http://127.0.0.1:{port}")
+    console.print()
 
     if open_browser:
         import webbrowser

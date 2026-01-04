@@ -65,6 +65,7 @@ function initApp() {
   Components.setupFeedbackBar();
   Components.setupGlobalApproval();
   Components.setupIssuePicker();
+  Components.setupProjectPicker();
 
   // Subscribe to store changes
   setupSubscriptions();

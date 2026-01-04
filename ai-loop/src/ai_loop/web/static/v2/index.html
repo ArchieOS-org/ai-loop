@@ -60,6 +60,25 @@
     <header class="header">
       <div class="header__left">
         <h1 class="header__logo">AI Loop</h1>
+        <!-- Project Picker -->
+        <div class="project-picker" id="project-picker">
+          <button class="project-picker__trigger" id="project-trigger">
+            <span class="project-picker__name" id="project-name">Loading...</span>
+            <span class="project-picker__chevron">▼</span>
+          </button>
+          <div class="project-picker__dropdown hidden" id="project-dropdown">
+            <div class="project-picker__section">
+              <div class="project-picker__label">Recent Projects</div>
+              <div class="project-picker__recents" id="project-recents">
+                <!-- Populated dynamically -->
+              </div>
+            </div>
+            <div class="project-picker__divider"></div>
+            <button class="project-picker__add-btn" id="add-project-btn">
+              Add Project…
+            </button>
+          </div>
+        </div>
       </div>
       <div class="header__controls">
         <div class="header__approval">
@@ -204,6 +223,21 @@
       <button class="mobile-tabs__btn active" data-panel="list">Runs</button>
       <button class="mobile-tabs__btn" data-panel="detail">Detail</button>
     </nav>
+  </div>
+
+  <!-- Add Project Modal (paste path) -->
+  <div class="modal hidden" id="add-project-modal">
+    <div class="modal__backdrop"></div>
+    <div class="modal__content">
+      <h3 class="modal__title">Add Project</h3>
+      <p class="modal__hint">Paste the full path to a git repository</p>
+      <input type="text" id="path-input" class="input" placeholder="/Users/you/my-project" autofocus>
+      <div id="path-error" class="modal__error hidden"></div>
+      <div class="modal__actions">
+        <button id="add-cancel" class="btn btn-ghost">Cancel</button>
+        <button id="add-confirm" class="btn btn-primary">Open</button>
+      </div>
+    </div>
   </div>
 
   <!-- Scripts -->
