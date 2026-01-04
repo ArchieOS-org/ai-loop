@@ -176,6 +176,9 @@ const Timeline = {
       case 'run.created':
         div.innerHTML = this.renderCreatedCard(entry);
         break;
+      case 'run.progress':
+        div.innerHTML = this.renderProgressCard(entry);
+        break;
       default:
         div.innerHTML = this.renderSystemCard(entry);
     }
@@ -184,38 +187,68 @@ const Timeline = {
   },
 
   /**
-   * Render phase output card (ONE card per phase, MULTIPLE steps inside)
+   * Render phase output card (Claude outputs)
+   * Uses <button> for accessibility, markdown for content
+   * Stats hidden unless real data present
    */
   renderPhaseOutputCard(entry) {
     const steps = entry.payload.steps || [];
     const collapsed = Store.isCollapsed(entry.id);
     const safeTitle = this.escapeHtml(entry.title);
 
-    // Calculate total duration and chars
+    // Calculate stats (only show if we have real data)
     const totalDuration = steps.reduce((sum, s) => sum + (s.duration_s || 0), 0);
     const totalChars = steps.reduce((sum, s) => sum + (s.char_count || 0), 0);
-    const stats = `${steps.length} step${steps.length !== 1 ? 's' : ''}, ${totalChars.toLocaleString()} chars, ${totalDuration.toFixed(1)}s`;
 
-    // Render all step sections
-    const stepsHtml = steps.map(step => {
-      const safeStep = this.escapeHtml((step.step || 'output').replace(/_/g, ' '));
-      const safeText = this.escapeHtml(step.text || '');
-      const duration = step.duration_s ? ` (${step.duration_s.toFixed(1)}s)` : '';
+    // Build stats string only with available data
+    const statsParts = [];
+    if (steps.length > 0) statsParts.push(`${steps.length} step${steps.length !== 1 ? 's' : ''}`);
+    if (totalChars > 0) statsParts.push(`${totalChars.toLocaleString()} chars`);
+    if (totalDuration > 0) statsParts.push(`${totalDuration.toFixed(1)}s`);
+    const stats = statsParts.join(', ');
+
+    // Track plan revision number (only count plan-generating steps)
+    let planRevision = 0;
+
+    const stepsHtml = steps.map((step, idx) => {
+      let stepTitle = (step.step || 'output').replace(/_/g, ' ');
+
+      // Correct plan versioning: count only plan steps
+      if (step.step === 'generate_plan') {
+        planRevision++;
+        stepTitle = `Plan v${planRevision}`;
+      } else if (step.step === 'refine_plan') {
+        planRevision++;
+        stepTitle = `Plan v${planRevision}`;
+      } else if (step.step === 'implement') {
+        stepTitle = 'Implementation';
+      } else if (step.step === 'fix_code') {
+        stepTitle = 'Fix';
+      }
+
+      const duration = step.duration_s ? `${step.duration_s.toFixed(1)}s` : '';
+      // Stable cache key: entry.id + step index + step name
+      const cacheKey = `${entry.id}:${idx}:${step.step || 'output'}`;
+
       return `
         <div class="output-step">
-          <div class="step-header">${safeStep}${duration}</div>
-          <pre class="output-text">${safeText}</pre>
+          <div class="step-header">
+            <span class="step-title">${this.escapeHtml(stepTitle)}</span>
+            ${duration ? `<span class="step-duration">${duration}</span>` : ''}
+          </div>
+          <div class="markdown-content">${Markdown.render(step.text || '', cacheKey)}</div>
         </div>
       `;
     }).join('');
 
     return `
-      <div class="card-header card-header--output" data-action="toggle">
-        <span class="card-icon">&#9654;</span>
+      <button type="button" class="card-header card-header--claude" aria-expanded="${!collapsed}" data-action="toggle">
+        <span class="card-icon">&#129302;</span>
         <span class="card-title">${safeTitle}</span>
-        <span class="card-stats">${stats}</span>
-        <span class="card-chevron">${collapsed ? '&#9656;' : '&#9662;'}</span>
-      </div>
+        ${stats ? `<span class="card-stats">${stats}</span>` : ''}
+        <span class="card-badge card-badge--claude">Claude</span>
+        <span class="card-chevron">&#9662;</span>
+      </button>
       <div class="output-body ${collapsed ? 'collapsed' : ''}">
         ${stepsHtml}
       </div>
@@ -223,71 +256,133 @@ const Timeline = {
   },
 
   /**
-   * Render single output card (legacy, for direct run.output events)
+   * Render single output card (Claude output)
+   * Stats hidden unless real data present
    */
   renderOutputCard(entry) {
     const collapsed = Store.isCollapsed(entry.id);
-    const safeTitle = this.escapeHtml(entry.title);
-    const safeText = this.escapeHtml(entry.payload?.text || '');
-    const duration = entry.payload?.duration_s ? ` (${entry.payload.duration_s.toFixed(1)}s)` : '';
+    const step = entry.payload?.step || 'output';
+
+    // Format step name
+    let stepTitle = step.replace(/_/g, ' ');
+    if (step === 'generate_plan') stepTitle = 'Generated Plan';
+    else if (step === 'refine_plan') stepTitle = 'Refined Plan';
+    else if (step === 'implement') stepTitle = 'Implementation Log';
+    else if (step === 'fix_code') stepTitle = 'Fix Log';
+
+    // Build stats only with available data
+    const statsParts = [];
+    if (entry.payload?.char_count > 0) statsParts.push(`${entry.payload.char_count.toLocaleString()} chars`);
+    if (entry.payload?.duration_s > 0) statsParts.push(`${entry.payload.duration_s.toFixed(1)}s`);
+    const stats = statsParts.join(', ');
+
+    // Stable cache key: entry.id + step name
+    const cacheKey = `${entry.id}:${step}`;
 
     return `
-      <div class="card-header card-header--output" data-action="toggle">
-        <span class="card-icon">&#9654;</span>
-        <span class="card-title">${safeTitle}</span>
-        <span class="card-stats">${entry.payload?.char_count?.toLocaleString() || 0} chars${duration}</span>
-        <span class="card-chevron">${collapsed ? '&#9656;' : '&#9662;'}</span>
-      </div>
+      <button type="button" class="card-header card-header--claude" aria-expanded="${!collapsed}" data-action="toggle">
+        <span class="card-icon">&#129302;</span>
+        <span class="card-title">${this.escapeHtml(stepTitle)}</span>
+        ${stats ? `<span class="card-stats">${stats}</span>` : ''}
+        <span class="card-badge card-badge--claude">Claude</span>
+        <span class="card-chevron">&#9662;</span>
+      </button>
       <div class="output-body ${collapsed ? 'collapsed' : ''}">
-        <pre class="output-text">${safeText}</pre>
+        <div class="markdown-content">${Markdown.render(entry.payload?.text || '', cacheKey)}</div>
       </div>
     `;
   },
 
   /**
-   * Render gate card with approval status
+   * Render gate card with critique feedback (ChatGPT responses)
    */
   renderGateCard(entry) {
-    const { confidence, approved, blockers = [], warnings = [], pending } = entry.payload;
+    const { confidence, approved, blockers = [], warnings = [], feedback, pending, critique } = entry.payload;
+    const feedbackText = feedback || critique?.feedback || '';
     const collapsed = Store.isCollapsed(entry.id);
     const safeTitle = this.escapeHtml(entry.title);
 
     const icon = pending ? '&#9679;' : (approved ? '&#10003;' : '&#10007;');
     const iconClass = pending ? 'pending' : (approved ? 'approved' : 'blocked');
 
-    const blockersHtml = blockers.length ? `
-      <div class="gate-blockers">
-        ${blockers.map(b => `<div class="blocker">&#8226; ${this.escapeHtml(b)}</div>`).join('')}
-      </div>
-    ` : '';
+    let sections = [];
 
-    const warningsHtml = warnings.length ? `
-      <div class="gate-warnings">
-        ${warnings.map(w => `<div class="warning">&#8226; ${this.escapeHtml(w)}</div>`).join('')}
-      </div>
-    ` : '';
+    // Critique feedback (most prominent) - render as markdown
+    if (feedbackText) {
+      const cacheKey = `feedback:${entry.id}:${feedbackText.length}`;
+      sections.push(`
+        <div class="critique-feedback">
+          <div class="critique-feedback__header">Critique Feedback</div>
+          <div class="critique-feedback__content markdown-content">
+            ${Markdown.render(feedbackText, cacheKey)}
+          </div>
+        </div>
+      `);
+    }
+
+    // Blockers
+    if (blockers.length) {
+      sections.push(`
+        <div class="gate-section gate-blockers">
+          <div class="gate-section__header">Blockers (${blockers.length})</div>
+          <ul class="gate-list">
+            ${blockers.map(b => `<li>${this.escapeHtml(b)}</li>`).join('')}
+          </ul>
+        </div>
+      `);
+    }
+
+    // Warnings
+    if (warnings.length) {
+      sections.push(`
+        <div class="gate-section gate-warnings">
+          <div class="gate-section__header">Warnings (${warnings.length})</div>
+          <ul class="gate-list">
+            ${warnings.map(w => `<li>${this.escapeHtml(w)}</li>`).join('')}
+          </ul>
+        </div>
+      `);
+    }
+
+    const hasBody = sections.length > 0;
 
     return `
-      <div class="card-header" data-action="toggle">
+      <button type="button" class="card-header card-header--gpt" aria-expanded="${!collapsed}" data-action="toggle">
         <span class="card-icon card-icon--${iconClass}">${icon}</span>
         <span class="card-title">${safeTitle}</span>
         ${confidence !== undefined ? `<span class="confidence-badge">${confidence}%</span>` : ''}
-        <span class="card-chevron">${collapsed ? '&#9656;' : '&#9662;'}</span>
-      </div>
-      <div class="card-body ${collapsed ? 'collapsed' : ''}">
-        ${blockersHtml}
-        ${warningsHtml}
-      </div>
+        <span class="card-badge card-badge--gpt">ChatGPT</span>
+        ${hasBody ? `<span class="card-chevron">&#9662;</span>` : ''}
+      </button>
+      ${hasBody ? `<div class="card-body ${collapsed ? 'collapsed' : ''}">${sections.join('')}</div>` : ''}
     `;
   },
 
   /**
-   * Render artifact card
+   * Render artifact card (expandable for plans with content)
    */
   renderArtifactCard(entry) {
     const safeTitle = this.escapeHtml(entry.title);
-    const { type, version, path } = entry.payload;
+    const { type, version, path, content } = entry.payload;
+    const collapsed = Store.isCollapsed(entry.id);
+    const hasContent = type === 'plan' && content;
 
+    if (hasContent) {
+      const cacheKey = `artifact:${entry.id}:${version}`;
+      return `
+        <button type="button" class="card-header card-header--artifact" aria-expanded="${!collapsed}" data-action="toggle">
+          <span class="card-icon">&#128196;</span>
+          <span class="card-title">${safeTitle}</span>
+          ${path ? `<span class="card-path">${this.escapeHtml(path)}</span>` : ''}
+          <span class="card-chevron">&#9662;</span>
+        </button>
+        <div class="output-body ${collapsed ? 'collapsed' : ''}">
+          <div class="markdown-content">${Markdown.render(content, cacheKey)}</div>
+        </div>
+      `;
+    }
+
+    // Non-expandable artifact (no content)
     return `
       <div class="card-header card-header--artifact">
         <span class="card-icon">&#128196;</span>
@@ -351,6 +446,25 @@ const Timeline = {
   },
 
   /**
+   * Render progress card (in-flight operations with spinner)
+   */
+  renderProgressCard(entry) {
+    const safeTitle = this.escapeHtml(entry.title);
+    const progressType = entry.payload?.progress_type || 'unknown';
+    // Gear for claude, magnifying glass for critique
+    const icon = progressType === 'claude' ? '&#9881;' : '&#128269;';
+
+    return `
+      <div class="card-header card-header--progress">
+        <span class="card-icon card-icon--spinner">${icon}</span>
+        <span class="card-title">${safeTitle}</span>
+        <span class="card-spinner"></span>
+        <span class="card-timestamp">${this.formatTime(entry.ts)}</span>
+      </div>
+    `;
+  },
+
+  /**
    * Render system/info card (default fallback)
    */
   renderSystemCard(entry) {
@@ -382,6 +496,7 @@ const Timeline = {
     // Handle toggle collapse
     const toggle = e.target.closest('[data-action="toggle"]');
     if (toggle) {
+      e.preventDefault();
       const card = toggle.closest('.timeline-card');
       const entryId = card?.dataset.entryId;
       if (entryId) {
@@ -523,7 +638,7 @@ const Timeline = {
 
     entries.forEach(entry => {
       // Only collapse entries that have toggleable bodies
-      if (['run.output', 'run.phase_output', 'run.gate'].includes(entry.kind)) {
+      if (['run.output', 'run.phase_output', 'run.gate', 'run.artifact'].includes(entry.kind)) {
         newCollapsed[entry.id] = true;
       }
     });

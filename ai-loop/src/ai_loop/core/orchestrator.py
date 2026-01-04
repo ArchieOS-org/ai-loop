@@ -286,7 +286,20 @@ class PipelineOrchestrator:
             term_log("PLANNING", "Generating plan with Claude...")
 
             # Generate initial plan
-            plan_content, elapsed = await self.claude.generate_plan(safe_issue, ctx.repo_root)
+            log("claude_started", {
+                "phase": "planning",
+                "step": "generate_plan",
+                "description": "Generating implementation plan...",
+            })
+            try:
+                plan_content, elapsed = await self.claude.generate_plan(safe_issue, ctx.repo_root)
+            except Exception as e:
+                log("claude_error", {
+                    "phase": "planning",
+                    "step": "generate_plan",
+                    "error": str(e),
+                })
+                raise
             ctx.current_iteration = 1
             plan = PlanVersion(version=1, content=plan_content)
             ctx.plan_versions.append(plan)
@@ -298,7 +311,7 @@ class PipelineOrchestrator:
                 "duration_s": elapsed,
                 "char_count": len(plan_content),
             })
-            log("plan_generated", {"version": 1})
+            log("plan_generated", {"version": 1, "content": plan_content})
 
             # === PLAN_GATE LOOP ===
             while ctx.current_iteration <= ctx.max_iterations:
@@ -307,21 +320,36 @@ class PipelineOrchestrator:
                 term_log("PLAN_GATE", f"Running critique (iteration {ctx.current_iteration})...")
 
                 # Run OpenAI critique
+                log("critique_started", {
+                    "gate_type": "plan_gate",
+                    "iteration": ctx.current_iteration,
+                    "description": f"Running plan critique (iteration {ctx.current_iteration})...",
+                })
                 prev_critique = ctx.plan_gates[-1] if ctx.plan_gates else None
-                critique = await self.critique.plan_gate(
-                    issue_pack,
-                    ctx.plan_versions[-1].content,
-                    ctx.current_iteration,
-                    ctx,
-                    prev_critique=prev_critique,
-                )
+                try:
+                    critique = await self.critique.plan_gate(
+                        issue_pack,
+                        ctx.plan_versions[-1].content,
+                        ctx.current_iteration,
+                        ctx,
+                        prev_critique=prev_critique,
+                    )
+                except Exception as e:
+                    log("critique_error", {
+                        "gate_type": "plan_gate",
+                        "iteration": ctx.current_iteration,
+                        "error": str(e),
+                    })
+                    raise
                 ctx.plan_gates.append(critique)
                 log(
                     "plan_gate_result",
                     {
                         "confidence": critique.confidence,
                         "approved": critique.approved,
-                        "blockers": len(critique.blockers),
+                        "blockers": critique.blockers,
+                        "warnings": critique.warnings,
+                        "feedback": critique.feedback,
                     },
                 )
                 term_log("PLAN_GATE", f"Result: confidence={critique.confidence}, approved={critique.approved}")
@@ -381,14 +409,27 @@ class PipelineOrchestrator:
                 human_feedback = ctx.human_feedback
                 ctx.human_feedback = ""  # Clear after use
 
-                refined, elapsed = await self.claude.refine_plan(
-                    safe_issue,
-                    ctx.plan_versions[-1].content,
-                    critique,
-                    ctx.current_iteration - 1,
-                    ctx.repo_root,
-                    human_feedback=human_feedback,
-                )
+                log("claude_started", {
+                    "phase": "planning",
+                    "step": "refine_plan",
+                    "description": f"Refining plan (iteration {ctx.current_iteration})...",
+                })
+                try:
+                    refined, elapsed = await self.claude.refine_plan(
+                        safe_issue,
+                        ctx.plan_versions[-1].content,
+                        critique,
+                        ctx.current_iteration - 1,
+                        ctx.repo_root,
+                        human_feedback=human_feedback,
+                    )
+                except Exception as e:
+                    log("claude_error", {
+                        "phase": "planning",
+                        "step": "refine_plan",
+                        "error": str(e),
+                    })
+                    raise
                 plan = PlanVersion(version=ctx.current_iteration, content=refined)
                 ctx.plan_versions.append(plan)
                 self.artifacts.write_plan(ctx, ctx.current_iteration, refined)
@@ -399,7 +440,7 @@ class PipelineOrchestrator:
                     "duration_s": elapsed,
                     "char_count": len(refined),
                 })
-                log("plan_refined", {"version": ctx.current_iteration})
+                log("plan_refined", {"version": ctx.current_iteration, "content": refined})
 
             # Check if we exhausted iterations
             if ctx.current_iteration > ctx.max_iterations and not ctx.final_plan:
@@ -413,7 +454,20 @@ class PipelineOrchestrator:
                 log("implementation_started")
                 term_log("IMPLEMENTING", "Claude implementing final plan...")
 
-                implement_log, elapsed = await self.claude.implement(ctx.final_plan, ctx)
+                log("claude_started", {
+                    "phase": "implementation",
+                    "step": "implement",
+                    "description": "Implementing approved plan...",
+                })
+                try:
+                    implement_log, elapsed = await self.claude.implement(ctx.final_plan, ctx)
+                except Exception as e:
+                    log("claude_error", {
+                        "phase": "implementation",
+                        "step": "implement",
+                        "error": str(e),
+                    })
+                    raise
                 self.artifacts.write_implement_log(ctx, implement_log)
                 log("claude_completed", {
                     "phase": "implementation",
@@ -436,20 +490,35 @@ class PipelineOrchestrator:
                     # TODO: Actually run tests and capture output
                     test_results = None
 
-                    critique = await self.critique.code_gate(
-                        ctx.final_plan,
-                        git_diff,
-                        test_results,
-                        fix_iteration,
-                        ctx,
-                    )
+                    log("critique_started", {
+                        "gate_type": "code_gate",
+                        "iteration": fix_iteration,
+                        "description": f"Running code critique (iteration {fix_iteration})...",
+                    })
+                    try:
+                        critique = await self.critique.code_gate(
+                            ctx.final_plan,
+                            git_diff,
+                            test_results,
+                            fix_iteration,
+                            ctx,
+                        )
+                    except Exception as e:
+                        log("critique_error", {
+                            "gate_type": "code_gate",
+                            "iteration": fix_iteration,
+                            "error": str(e),
+                        })
+                        raise
                     ctx.code_gates.append(critique)
                     log(
                         "code_gate_result",
                         {
                             "confidence": critique.confidence,
                             "approved": critique.approved,
-                            "blockers": len(critique.blockers),
+                            "blockers": critique.blockers,
+                            "warnings": critique.warnings,
+                            "feedback": critique.feedback,
                         },
                     )
                     term_log("CODE_GATE", f"Result: confidence={critique.confidence}, approved={critique.approved}")
@@ -491,12 +560,25 @@ class PipelineOrchestrator:
                             human_feedback = ctx.human_feedback
                             ctx.human_feedback = ""
 
-                            fix_log, elapsed = await self.claude.fix_code(
-                                ctx.final_plan,
-                                critique,
-                                ctx,
-                                human_feedback=human_feedback,
-                            )
+                            log("claude_started", {
+                                "phase": "fixing",
+                                "step": "fix_code",
+                                "description": f"Fixing code issues (iteration {fix_iteration})...",
+                            })
+                            try:
+                                fix_log, elapsed = await self.claude.fix_code(
+                                    ctx.final_plan,
+                                    critique,
+                                    ctx,
+                                    human_feedback=human_feedback,
+                                )
+                            except Exception as e:
+                                log("claude_error", {
+                                    "phase": "fixing",
+                                    "step": "fix_code",
+                                    "error": str(e),
+                                })
+                                raise
                             self.artifacts.write_fix_log(ctx, fix_iteration, fix_log)
                             log("claude_completed", {
                                 "phase": "fixing",

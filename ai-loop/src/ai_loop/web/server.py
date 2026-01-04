@@ -395,10 +395,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         file_positions: dict[str, int] = {}
         last_heartbeat = time.time()
         last_scan = 0.0
+        is_fresh_connection = len(replay_positions) == 0
 
         # Send init event with current state
         init_data = self._build_sse_init()
         self._send_sse_event("init", init_data)
+
+        # Initial scan - replay active runs from beginning on fresh connection
+        self._scan_for_new_runs(file_positions, replay_all=is_fresh_connection)
 
         try:
             while True:
@@ -406,7 +410,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
                 # Periodic scan for new run directories (every 10s)
                 if now - last_scan > 10:
-                    self._scan_for_new_runs(file_positions)
+                    self._scan_for_new_runs(file_positions, replay_all=False)
                     last_scan = now
 
                 # Tail all active trace files
@@ -474,39 +478,96 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             for run_dir in sorted(self.artifacts_dir.iterdir(), reverse=True):
                 if not run_dir.is_dir():
                     continue
+
+                run_id = run_dir.name
                 summary_path = run_dir / "summary.json"
-                if not summary_path.exists():
-                    continue
-                try:
-                    data = json.loads(summary_path.read_text())
-                    if data.get("hidden_at"):
+                trace_path = run_dir / "trace.jsonl"
+
+                # Case 1: Completed run with summary.json
+                if summary_path.exists():
+                    try:
+                        data = json.loads(summary_path.read_text())
+                        if data.get("hidden_at"):
+                            continue
+                        run_id = data.get("run_id", run_dir.name)
+
+                        # Count lines in trace file for last event ID
+                        if trace_path.exists():
+                            try:
+                                line_count = sum(1 for _ in open(trace_path))
+                                last_event_ids[run_id] = f"{run_id}:{line_count}"
+                            except IOError:
+                                pass
+
+                        # Map to run shape expected by UI
+                        runs.append({
+                            "run_id": run_id,
+                            "issue_identifier": data.get("issue_identifier", ""),
+                            "issue_title": data.get("issue_title", ""),
+                            "status": data.get("status", "unknown"),
+                            "approval_mode": data.get("approval_mode", "auto"),
+                            "iteration": data.get("iteration", 0),
+                            "confidence": data.get("confidence"),
+                            "started_at": data.get("started_at"),
+                            "completed_at": data.get("completed_at"),
+                            "gate_pending": self._get_gate_pending(run_dir),
+                        })
+                    except (json.JSONDecodeError, IOError):
                         continue
-                    run_id = data.get("run_id", run_dir.name)
 
-                    # Count lines in trace file for last event ID
-                    trace_path = run_dir / "trace.jsonl"
-                    if trace_path.exists():
-                        try:
-                            line_count = sum(1 for _ in open(trace_path))
-                            last_event_ids[run_id] = f"{run_id}:{line_count}"
-                        except IOError:
-                            pass
+                # Case 2: Active run with trace.jsonl but no summary.json
+                elif trace_path.exists():
+                    try:
+                        # Parse first event to get issue info
+                        issue_identifier = ""
+                        started_at = None
+                        with open(trace_path, "r") as f:
+                            first_line = f.readline().strip()
+                            if first_line:
+                                first_event = json.loads(first_line)
+                                # pipeline_started event has issue in data
+                                issue_identifier = first_event.get("data", {}).get("issue", "")
+                                started_at = first_event.get("timestamp")
 
-                    # Map to run shape expected by UI
-                    runs.append({
-                        "run_id": run_id,
-                        "issue_identifier": data.get("issue_identifier", ""),
-                        "issue_title": data.get("issue_title", ""),
-                        "status": data.get("status", "unknown"),
-                        "approval_mode": data.get("approval_mode", "auto"),
-                        "iteration": data.get("iteration", 0),
-                        "confidence": data.get("confidence"),
-                        "started_at": data.get("started_at"),
-                        "completed_at": data.get("completed_at"),
-                        "gate_pending": self._get_gate_pending(run_dir),
-                    })
-                except (json.JSONDecodeError, IOError):
-                    continue
+                        # Count lines for last event ID
+                        line_count = sum(1 for _ in open(trace_path))
+                        last_event_ids[run_id] = f"{run_id}:{line_count}"
+
+                        # Detect stale/orphaned runs: no activity for 5+ minutes
+                        # and no active job for this run
+                        trace_mtime = trace_path.stat().st_mtime
+                        is_stale = (time.time() - trace_mtime) > 300  # 5 minutes
+
+                        # Check if there's an active job for this run
+                        has_active_job = False
+                        jobs_dir = self.artifacts_dir / "jobs"
+                        if jobs_dir.exists():
+                            for job_file in jobs_dir.glob("*.json"):
+                                try:
+                                    job_data = json.loads(job_file.read_text())
+                                    if job_data.get("run_id") == run_id and job_data.get("status") in ("running", "stopping"):
+                                        has_active_job = True
+                                        break
+                                except (json.JSONDecodeError, IOError):
+                                    pass
+
+                        # Determine status: stale if no recent activity and no active job
+                        status = "stale" if (is_stale and not has_active_job) else "running"
+
+                        runs.append({
+                            "run_id": run_id,
+                            "issue_identifier": issue_identifier,
+                            "issue_title": "",  # Not available without summary
+                            "status": status,
+                            "approval_mode": "auto",
+                            "iteration": 0,
+                            "confidence": None,
+                            "started_at": started_at,
+                            "completed_at": None,
+                            "gate_pending": self._get_gate_pending(run_dir),
+                        })
+                    except (json.JSONDecodeError, IOError):
+                        continue
 
         # Combine all last event IDs for resume
         combined_last_event_id = ",".join(last_event_ids.values()) if last_event_ids else None
@@ -528,8 +589,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 pass
         return None
 
-    def _scan_for_new_runs(self, file_positions: dict[str, int]) -> None:
-        """Scan artifacts dir for new run directories to tail."""
+    def _scan_for_new_runs(self, file_positions: dict[str, int], replay_all: bool = False) -> None:
+        """Scan artifacts dir for new run directories to tail.
+
+        Args:
+            file_positions: Dict tracking file positions and line numbers
+            replay_all: If True, start from beginning of file to replay all events
+                        for BOTH active and completed runs (fresh connection).
+                        If False, start from end (only new events, for reconnect/polling).
+        """
         if not self.artifacts_dir.exists():
             return
 
@@ -541,9 +609,25 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 continue
             trace_path = run_dir / "trace.jsonl"
             if trace_path.exists():
-                # Start tailing from current end
-                file_positions[run_id] = trace_path.stat().st_size
-                file_positions[f"{run_id}_line"] = sum(1 for _ in open(trace_path))
+                # Check if run is hidden (skip hidden runs entirely)
+                summary_path = run_dir / "summary.json"
+                if summary_path.exists():
+                    try:
+                        summary = json.loads(summary_path.read_text())
+                        if summary.get("hidden_at"):
+                            continue  # Skip hidden runs
+                    except (json.JSONDecodeError, IOError):
+                        pass
+
+                if replay_all:
+                    # Fresh connection: replay ALL events from beginning
+                    # This populates the timeline for both active and completed runs
+                    file_positions[run_id] = 0
+                    file_positions[f"{run_id}_line"] = 0
+                else:
+                    # Reconnect or polling: start from end (only new events)
+                    file_positions[run_id] = trace_path.stat().st_size
+                    file_positions[f"{run_id}_line"] = sum(1 for _ in open(trace_path))
 
     def _to_canonical_event(self, run_id: str, trace_event: dict, line_number: int) -> dict:
         """Transform legacy trace event to canonical envelope.
@@ -616,7 +700,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             envelope["kind"] = "run.artifact"
             version = data.get("version", 1)
             envelope["title"] = f"Plan v{version}"
-            envelope["payload"] = {"type": "plan", "version": version, "path": data.get("path")}
+            envelope["payload"] = {
+                "type": "plan",
+                "version": version,
+                "path": data.get("path"),
+                "content": data.get("content", ""),
+            }
 
         elif event_type in ("plan_gate_result", "code_gate_result"):
             envelope["kind"] = "run.gate"
@@ -629,7 +718,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 "confidence": data.get("confidence"),
                 "approved": approved,
                 "blockers": data.get("blockers", []),
-                "warnings": data.get("warnings", [])
+                "warnings": data.get("warnings", []),
+                "feedback": data.get("feedback", ""),
             }
 
         elif event_type == "plan_approved":
@@ -716,6 +806,49 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             envelope["kind"] = "run.milestone"
             envelope["title"] = "Dry run completed"
             envelope["payload"] = {"milestone_name": "dry_run_completed"}
+
+        # Real-time progress events (emitted before long operations)
+        elif event_type == "claude_started":
+            envelope["kind"] = "run.progress"
+            envelope["title"] = data.get("description", "Invoking Claude...")
+            envelope["payload"] = {
+                "progress_type": "claude",
+                "phase": data.get("phase"),
+                "step": data.get("step"),
+                "spinner": True,
+            }
+
+        elif event_type == "critique_started":
+            envelope["kind"] = "run.progress"
+            envelope["title"] = data.get("description", "Running critique...")
+            envelope["payload"] = {
+                "progress_type": "critique",
+                "gate_type": data.get("gate_type"),
+                "iteration": data.get("iteration"),
+                "spinner": True,
+            }
+
+        elif event_type == "claude_error":
+            envelope["kind"] = "run.system"
+            envelope["severity"] = "error"
+            step = data.get("step", "unknown")
+            envelope["title"] = f"Claude failed: {step.replace('_', ' ')}"
+            envelope["payload"] = {
+                "phase": data.get("phase"),
+                "step": step,
+                "error": data.get("error", "Unknown error"),
+            }
+
+        elif event_type == "critique_error":
+            envelope["kind"] = "run.system"
+            envelope["severity"] = "error"
+            gate_type = data.get("gate_type", "unknown")
+            envelope["title"] = f"Critique failed: {gate_type.replace('_', ' ')}"
+            envelope["payload"] = {
+                "gate_type": gate_type,
+                "iteration": data.get("iteration"),
+                "error": data.get("error", "Unknown error"),
+            }
 
         elif event_type == "pipeline_rejected":
             envelope["kind"] = "run.milestone"

@@ -28,7 +28,7 @@ function createRunCard(run) {
         <option value="gate_on_fail" ${run.approval_mode === 'gate_on_fail' ? 'selected' : ''}>Gate on fail</option>
         <option value="always_gate" ${run.approval_mode === 'always_gate' ? 'selected' : ''}>Always gate</option>
       </select>
-      ${run.confidence !== null ? `<span class="run-card__confidence">${Math.round(run.confidence * 100)}%</span>` : ''}
+      ${run.confidence !== null ? `<span class="run-card__confidence">${Math.round(run.confidence)}%</span>` : ''}
       <span class="run-card__time">${formatTime(run.started_at)}</span>
     </div>
   `;
@@ -61,12 +61,12 @@ function updateRunCard(card, run) {
   const confidence = card.querySelector('.run-card__confidence');
   if (run.confidence !== null) {
     if (confidence) {
-      confidence.textContent = `${Math.round(run.confidence * 100)}%`;
+      confidence.textContent = `${Math.round(run.confidence)}%`;
     } else {
       const meta = card.querySelector('.run-card__meta');
       const span = document.createElement('span');
       span.className = 'run-card__confidence';
-      span.textContent = `${Math.round(run.confidence * 100)}%`;
+      span.textContent = `${Math.round(run.confidence)}%`;
       meta.insertBefore(span, meta.lastElementChild);
     }
   }
@@ -177,7 +177,7 @@ function renderCritique() {
       <div class="critique-score mb-3">
         <span class="text-secondary">Confidence:</span>
         <span class="font-medium ${critique.approved ? 'text-success' : 'text-warning'}">
-          ${critique.confidence !== undefined ? `${Math.round(critique.confidence * 100)}%` : 'N/A'}
+          ${critique.confidence !== undefined ? `${Math.round(critique.confidence)}%` : 'N/A'}
         </span>
         <span class="badge badge-${critique.approved ? 'success' : 'warning'} ml-2">
           ${critique.approved ? 'Approved' : 'Needs Review'}
@@ -436,6 +436,7 @@ function getStatusColor(status) {
     failed: 'danger',
     error: 'danger',
     stopped: 'secondary',
+    stale: 'warning',
   };
   return colors[status] || 'secondary';
 }
@@ -455,6 +456,7 @@ function formatStatus(status) {
     failed: 'Failed',
     error: 'Error',
     stopped: 'Stopped',
+    stale: 'Stale',
   };
   return labels[status] || status || 'Unknown';
 }

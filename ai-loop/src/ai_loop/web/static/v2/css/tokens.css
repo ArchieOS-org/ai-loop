@@ -48,6 +48,17 @@
   --color-info-bg: rgba(0, 122, 255, 0.15);
   --color-neutral: #8e8e93;
 
+  /* Agent source colors */
+  --agent-claude: #8b5cf6;        /* Purple */
+  --agent-claude-bg: rgba(139, 92, 246, 0.12);
+  --agent-claude-badge: rgba(139, 92, 246, 0.2);
+  --agent-claude-text: #a78bfa;
+
+  --agent-gpt: #10a37f;           /* Green */
+  --agent-gpt-bg: rgba(16, 163, 127, 0.12);
+  --agent-gpt-badge: rgba(16, 163, 127, 0.2);
+  --agent-gpt-text: #10a37f;
+
   /* ============================================
      TYPOGRAPHY
      ============================================ */
