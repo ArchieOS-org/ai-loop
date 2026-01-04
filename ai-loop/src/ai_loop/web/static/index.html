@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Loop</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+      background: #0a0a0a;
+      color: #e5e5e5;
+      min-height: 100vh;
+      padding: 24px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid #222;
+    }
+    h1 { font-size: 20px; font-weight: 600; }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .mode-badge {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      padding: 4px 8px;
+      border-radius: 4px;
+    }
+    .mode-badge.dry_run { background: #1e3a5f; color: #60a5fa; }
+    .mode-badge.write_enabled { background: #14532d; color: #4ade80; }
+    .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 8px;
+    }
+    .status-dot.active { background: #22c55e; animation: pulse 2s infinite; }
+    .status-dot.idle { background: #666; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+    /* Issue Picker */
+    .section { margin-bottom: 32px; }
+    .section-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: #666;
+      margin-bottom: 12px;
+      letter-spacing: 0.5px;
+    }
+    .issue-picker {
+      background: #111;
+      border: 1px solid #222;
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .filters {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .filters select, .filters button, .filters input {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      color: #e5e5e5;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .filters input { cursor: text; }
+    .filters input::placeholder { color: #666; }
+    .filters select:hover, .filters button:hover, .filters input:hover {
+      border-color: #444;
+      background: #222;
+    }
+    .filters input:focus {
+      outline: none;
+      border-color: #60a5fa;
+    }
+    .issue-list {
+      max-height: 240px;
+      overflow-y: auto;
+      margin-bottom: 16px;
+    }
+    .issue-list::-webkit-scrollbar { width: 6px; }
+    .issue-list::-webkit-scrollbar-track { background: #1a1a1a; }
+    .issue-list::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+    .issue-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    .issue-row:hover { background: #1a1a1a; }
+    .issue-row.selected { background: #1e3a5f33; }
+    .issue-row input[type="checkbox"] {
+      accent-color: #60a5fa;
+      width: 16px;
+      height: 16px;
+    }
+    .issue-id {
+      font-weight: 600;
+      font-size: 13px;
+      color: #fff;
+      min-width: 70px;
+    }
+    .issue-title {
+      font-size: 13px;
+      color: #999;
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .issue-priority {
+      font-size: 11px;
+      color: #666;
+      padding: 2px 6px;
+      background: #1a1a1a;
+      border-radius: 3px;
+    }
+    .batch-actions {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .batch-actions button {
+      background: transparent;
+      border: 1px solid #333;
+      color: #999;
+      padding: 6px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .batch-actions button:hover {
+      border-color: #444;
+      color: #e5e5e5;
+    }
+    .actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-top: 16px;
+      border-top: 1px solid #222;
+    }
+    .actions label {
+      font-size: 13px;
+      color: #999;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .actions select {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      color: #e5e5e5;
+      padding: 6px 10px;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+    #start-btn {
+      background: #2563eb;
+      border: none;
+      color: #fff;
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    #start-btn:hover:not(:disabled) { background: #3b82f6; }
+    #start-btn:disabled {
+      background: #1a1a1a;
+      color: #666;
+      cursor: not-allowed;
+    }
+    .loading-issues {
+      text-align: center;
+      padding: 32px;
+      color: #666;
+    }
+    .no-issues {
+      text-align: center;
+      padding: 32px;
+      color: #666;
+    }
+
+    /* Runs List */
+    .empty-state {
+      text-align: center;
+      padding: 64px 24px;
+      color: #666;
+    }
+    .empty-state code {
+      display: inline-block;
+      background: #1a1a1a;
+      padding: 8px 12px;
+      border-radius: 6px;
+      margin-top: 12px;
+      font-size: 13px;
+    }
+    .run {
+      background: #111;
+      border: 1px solid #222;
+      border-radius: 8px;
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+    .run-header {
+      display: grid;
+      grid-template-columns: 80px 1fr auto;
+      gap: 16px;
+      padding: 16px;
+      cursor: pointer;
+      align-items: center;
+    }
+    .run-header:hover { background: #151515; }
+    .run-id { font-weight: 600; font-size: 14px; color: #fff; }
+    .run-title {
+      font-size: 14px;
+      color: #999;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .run-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 500;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .badge.planning, .badge.plan_gate, .badge.refining { background: #1e3a5f; color: #60a5fa; }
+    .badge.implementing, .badge.code_gate, .badge.fixing { background: #3f3f1e; color: #fbbf24; }
+    .badge.success { background: #14532d; color: #4ade80; }
+    .badge.failed { background: #450a0a; color: #f87171; }
+    .badge.stuck { background: #451a03; color: #fb923c; }
+    .badge.pending { background: #1f1f1f; color: #666; }
+    .run-meta {
+      display: flex;
+      gap: 16px;
+      font-size: 12px;
+      color: #666;
+    }
+    .run-meta span { display: flex; align-items: center; gap: 4px; }
+    .conf-high { color: #4ade80; }
+    .conf-mid { color: #fbbf24; }
+    .conf-low { color: #f87171; }
+    .blockers { color: #f87171; }
+    .run-details {
+      display: none;
+      padding: 0 16px 16px;
+      border-top: 1px solid #222;
+    }
+    .run.expanded .run-details { display: block; }
+    .detail-section { margin-top: 16px; }
+    .detail-section h4 {
+      font-size: 11px;
+      text-transform: uppercase;
+      color: #666;
+      margin-bottom: 8px;
+    }
+    .events {
+      background: #0a0a0a;
+      border-radius: 4px;
+      padding: 12px;
+      font-family: "SF Mono", Monaco, monospace;
+      font-size: 12px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .event {
+      display: grid;
+      grid-template-columns: 60px 80px 1fr;
+      gap: 8px;
+      padding: 4px 0;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    .event:last-child { border-bottom: none; }
+    .event-time { color: #666; }
+    .event-type { color: #60a5fa; }
+    .event-data { color: #999; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .error-msg {
+      background: #1c0a0a;
+      border: 1px solid #450a0a;
+      border-radius: 4px;
+      padding: 12px;
+      color: #f87171;
+      font-size: 13px;
+    }
+
+    /* Jobs section */
+    .job-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      background: #111;
+      border: 1px solid #222;
+      border-radius: 8px;
+      margin-bottom: 8px;
+    }
+    .job-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .job-id { font-weight: 600; color: #fff; font-size: 13px; }
+    .job-issues { color: #999; font-size: 13px; }
+    .job-status {
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-weight: 500;
+    }
+    .job-status.running { background: #1e3a5f; color: #60a5fa; }
+    .job-status.stopping { background: #3f3f1e; color: #fbbf24; animation: pulse 1s infinite; }
+    .job-actions { display: flex; gap: 8px; }
+    .btn-stop, .btn-kill {
+      padding: 6px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      border: none;
+    }
+    .btn-stop { background: #3f3f1e; color: #fbbf24; }
+    .btn-stop:hover { background: #4f4f2e; }
+    .btn-kill { background: #450a0a; color: #f87171; }
+    .btn-kill:hover { background: #551a1a; }
+
+    /* Hide/unhide buttons for runs */
+    .run-actions {
+      display: flex;
+      gap: 8px;
+      margin-left: 12px;
+    }
+    .btn-hide, .btn-unhide {
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+      border: 1px solid #333;
+      background: transparent;
+      color: #666;
+    }
+    .btn-hide:hover, .btn-unhide:hover {
+      border-color: #444;
+      color: #999;
+    }
+    .run.hidden { opacity: 0.6; }
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .toggle-hidden {
+      font-size: 12px;
+      color: #666;
+      cursor: pointer;
+      background: transparent;
+      border: 1px solid #333;
+      padding: 4px 10px;
+      border-radius: 4px;
+    }
+    .toggle-hidden:hover { border-color: #444; color: #999; }
+    .toggle-hidden.active { background: #1e3a5f33; border-color: #60a5fa; color: #60a5fa; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>AI Loop</h1>
+    <div class="header-right">
+      <span class="mode-badge {{MODE}}">{{MODE}}</span>
+      <div id="polling-status"><span class="status-dot idle"></span>Connecting...</div>
+    </div>
+  </header>
+
+  <!-- Issue Picker Section -->
+  <section class="section">
+    <div class="section-title">Select Issues</div>
+    <div class="issue-picker">
+      <div class="filters">
+        <input type="text" id="team-filter" placeholder="Team (e.g. Dispatch)" value="Dispatch" style="width: 140px;">
+        <input type="text" id="project-filter" placeholder="Project (optional)" value="ai-loop" style="width: 140px;">
+        <select id="state-filter">
+          <option value="Todo">Todo</option>
+          <option value="In Progress">In Progress</option>
+          <option value="Backlog">Backlog</option>
+        </select>
+        <button onclick="refreshIssues()">Refresh</button>
+      </div>
+
+      <div id="issue-list" class="issue-list">
+        <div class="loading-issues">Loading issues...</div>
+      </div>
+
+      <div class="batch-actions">
+        <button onclick="selectAll()">Select All</button>
+        <button onclick="clearSelection()">Clear</button>
+      </div>
+
+      <div class="actions">
+        <label>Concurrency:
+          <select id="concurrency">
+            <option value="1">1</option>
+            <option value="3" selected>3</option>
+            <option value="5">5</option>
+          </select>
+        </label>
+        <button id="start-btn" onclick="startRuns()" disabled>Start</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Jobs Section (only visible when jobs are running) -->
+  <section class="section" id="jobs-section" style="display:none;">
+    <div class="section-title">Running Jobs</div>
+    <div id="jobs-list"></div>
+  </section>
+
+  <!-- Runs Section -->
+  <section class="section">
+    <div class="section-header">
+      <div class="section-title" style="margin-bottom:0;">Runs</div>
+      <button id="show-hidden-btn" class="toggle-hidden" onclick="toggleShowHidden()">Show hidden</button>
+    </div>
+    <main id="runs"></main>
+  </section>
+
+  <script>
+    // CSRF token and mode injected by server (no /api/token endpoint)
+    const csrfToken = '{{CSRF_TOKEN}}';
+    const serverMode = '{{MODE}}';
+
+    const runsEl = document.getElementById('runs');
+    const pollStatus = document.getElementById('polling-status');
+    let expandedRuns = new Set();
+    let lastData = [];
+    let selectedIssues = new Set();
+    let issuesData = [];
+    let showHidden = false;
+
+    // Issue picker functions
+    async function refreshIssues() {
+      const issueListEl = document.getElementById('issue-list');
+      issueListEl.innerHTML = '<div class="loading-issues">Loading issues...</div>';
+
+      const state = document.getElementById('state-filter').value;
+      const team = document.getElementById('team-filter').value.trim();
+      const project = document.getElementById('project-filter').value.trim();
+
+      let url = `/api/issues?state=${encodeURIComponent(state)}&limit=50`;
+      if (team) url += `&team=${encodeURIComponent(team)}`;
+      if (project) url += `&project=${encodeURIComponent(project)}`;
+
+      try {
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.error) {
+          console.error('API error:', data.error);
+          issueListEl.innerHTML = `<div class="no-issues" style="color:#f87171;">Error: ${escapeHtml(data.error)}</div>`;
+          return;
+        }
+        issuesData = data;
+        renderIssueList(issuesData);
+      } catch (e) {
+        console.error('Fetch error:', e);
+        issueListEl.innerHTML = `<div class="no-issues" style="color:#f87171;">Failed to load issues: ${escapeHtml(e.message)}</div>`;
+      }
+    }
+
+    function renderIssueList(issues) {
+      const el = document.getElementById('issue-list');
+
+      if (issues.length === 0) {
+        el.innerHTML = '<div class="no-issues">No issues found with these filters</div>';
+        return;
+      }
+
+      el.innerHTML = issues.map(i => `
+        <label class="issue-row ${selectedIssues.has(i.identifier) ? 'selected' : ''}">
+          <input type="checkbox"
+                 ${selectedIssues.has(i.identifier) ? 'checked' : ''}
+                 onchange="toggleIssue('${i.identifier}')">
+          <span class="issue-id">${i.identifier}</span>
+          <span class="issue-title">${escapeHtml(i.title)}</span>
+          <span class="issue-priority">P${i.priority}</span>
+        </label>
+      `).join('');
+      updateStartButton();
+    }
+
+    function toggleIssue(id) {
+      if (selectedIssues.has(id)) {
+        selectedIssues.delete(id);
+      } else {
+        selectedIssues.add(id);
+      }
+      renderIssueList(issuesData);
+    }
+
+    function selectAll() {
+      issuesData.forEach(i => selectedIssues.add(i.identifier));
+      renderIssueList(issuesData);
+    }
+
+    function clearSelection() {
+      selectedIssues.clear();
+      renderIssueList(issuesData);
+    }
+
+    function updateStartButton() {
+      const btn = document.getElementById('start-btn');
+      const count = selectedIssues.size;
+      btn.disabled = count === 0;
+      btn.textContent = count > 0 ? `Start (${count})` : 'Start';
+    }
+
+    async function startRuns() {
+      if (selectedIssues.size === 0) return;
+
+      const btn = document.getElementById('start-btn');
+      btn.disabled = true;
+      btn.textContent = 'Starting...';
+
+      const concurrency = parseInt(document.getElementById('concurrency').value);
+
+      try {
+        const res = await fetch('/api/runs', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrfToken,
+          },
+          body: JSON.stringify({
+            issue_identifiers: [...selectedIssues],
+            concurrency: concurrency
+          })
+        });
+
+        const result = await res.json();
+
+        // Show rejected issues if any
+        if (result.rejected?.length > 0) {
+          console.log('Rejected:', result.reason_by_issue);
+        }
+
+        // Clear selection and refresh
+        selectedIssues.clear();
+        refreshIssues();
+        fetchRuns();
+      } catch (e) {
+        console.error('Failed to start runs:', e);
+        updateStartButton();
+      }
+    }
+
+    // Jobs list functions
+    async function fetchJobs() {
+      try {
+        const res = await fetch('/api/jobs');
+        const jobs = await res.json();
+        const active = jobs.filter(j => j.status === 'running' || j.status === 'stopping');
+
+        const jobsSection = document.getElementById('jobs-section');
+        const jobsList = document.getElementById('jobs-list');
+
+        if (active.length === 0) {
+          jobsSection.style.display = 'none';
+          return;
+        }
+
+        jobsSection.style.display = 'block';
+        jobsList.innerHTML = active.map(j => {
+          const isStopping = j.status === 'stopping';
+          const issuesStr = j.issues.slice(0, 3).join(', ') + (j.issues.length > 3 ? '...' : '');
+          return `
+            <div class="job-row">
+              <div class="job-info">
+                <span class="job-id">Job ${j.job_id.slice(0,8)}</span>
+                <span class="job-issues">${escapeHtml(issuesStr)}</span>
+                <span class="job-status ${j.status}">${isStopping ? 'Stopping...' : 'Running'}</span>
+              </div>
+              <div class="job-actions">
+                ${isStopping
+                  ? `<button class="btn-kill" onclick="killJob('${j.job_id}')">Force Kill</button>`
+                  : `<button class="btn-stop" onclick="stopJob('${j.job_id}')">Stop</button>`
+                }
+              </div>
+            </div>
+          `;
+        }).join('');
+      } catch (e) {
+        console.error('Failed to fetch jobs:', e);
+      }
+    }
+
+    async function stopJob(jobId) {
+      try {
+        await fetch(`/api/jobs/${jobId}/stop`, {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': csrfToken }
+        });
+        fetchJobs();
+      } catch (e) {
+        console.error('Failed to stop job:', e);
+      }
+    }
+
+    async function killJob(jobId) {
+      if (!confirm('Force kill this job? This may leave work incomplete.')) return;
+      try {
+        await fetch(`/api/jobs/${jobId}/kill`, {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': csrfToken }
+        });
+        fetchJobs();
+        fetchRuns();
+      } catch (e) {
+        console.error('Failed to kill job:', e);
+      }
+    }
+
+    // Hide/unhide functions
+    function toggleShowHidden() {
+      showHidden = !showHidden;
+      const btn = document.getElementById('show-hidden-btn');
+      btn.textContent = showHidden ? 'Hide hidden' : 'Show hidden';
+      btn.classList.toggle('active', showHidden);
+      fetchRuns();
+    }
+
+    async function hideRun(runId, event) {
+      event.stopPropagation();
+      try {
+        await fetch(`/api/runs/${runId}/hide`, {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': csrfToken }
+        });
+        fetchRuns();
+      } catch (e) {
+        console.error('Failed to hide run:', e);
+      }
+    }
+
+    async function unhideRun(runId, event) {
+      event.stopPropagation();
+      try {
+        await fetch(`/api/runs/${runId}/unhide`, {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': csrfToken }
+        });
+        fetchRuns();
+      } catch (e) {
+        console.error('Failed to unhide run:', e);
+      }
+    }
+
+    // Runs list functions
+    async function fetchRuns() {
+      try {
+        const url = showHidden ? '/api/runs?show_hidden=true' : '/api/runs';
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('Failed to fetch');
+        const runs = await res.json();
+        lastData = runs;
+        pollStatus.innerHTML = '<span class="status-dot active"></span>Polling';
+        renderRuns(runs);
+      } catch (e) {
+        pollStatus.innerHTML = '<span class="status-dot idle"></span>Disconnected';
+      }
+    }
+
+    async function fetchRunDetail(runId) {
+      try {
+        const res = await fetch(`/api/runs/${runId}`);
+        if (!res.ok) return null;
+        return await res.json();
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function formatElapsed(startedAt, completedAt) {
+      if (!startedAt) return '-';
+      const start = new Date(startedAt);
+      const end = completedAt ? new Date(completedAt) : new Date();
+      const secs = Math.floor((end - start) / 1000);
+      const mins = Math.floor(secs / 60);
+      return mins > 0 ? `${mins}m ${secs % 60}s` : `${secs}s`;
+    }
+
+    function confClass(conf) {
+      if (conf >= 97) return 'conf-high';
+      if (conf >= 80) return 'conf-mid';
+      return 'conf-low';
+    }
+
+    function renderRuns(runs) {
+      if (runs.length === 0) {
+        runsEl.innerHTML = `
+          <div class="empty-state">
+            <p>No runs yet. Select issues above to start.</p>
+          </div>`;
+        return;
+      }
+
+      runsEl.innerHTML = runs.map(run => {
+        const isExpanded = expandedRuns.has(run.run_id);
+        const conf = run.final_confidence;
+        const elapsed = formatElapsed(run.started_at, run.completed_at);
+        const isHidden = !!run.hidden_at;
+
+        return `
+          <div class="run ${isExpanded ? 'expanded' : ''} ${isHidden ? 'hidden' : ''}" data-run-id="${run.run_id}">
+            <div class="run-header" onclick="toggleRun('${run.run_id}')">
+              <span class="run-id">${run.issue_identifier}</span>
+              <span class="run-title">${escapeHtml(run.issue_title)}</span>
+              <div class="run-status">
+                <span class="badge ${run.status}">${run.status.replace('_', ' ')}</span>
+                <div class="run-meta">
+                  ${run.iterations > 0 ? `<span>iter ${run.iterations}</span>` : ''}
+                  ${conf !== null ? `<span class="${confClass(conf)}">conf ${conf}</span>` : ''}
+                  <span>${elapsed}</span>
+                </div>
+                <div class="run-actions">
+                  ${isHidden
+                    ? `<button class="btn-unhide" onclick="unhideRun('${run.run_id}', event)">Unhide</button>`
+                    : `<button class="btn-hide" onclick="hideRun('${run.run_id}', event)">Hide</button>`
+                  }
+                </div>
+              </div>
+            </div>
+            <div class="run-details" id="details-${run.run_id}">
+              ${run.error_message ? `<div class="error-msg">${escapeHtml(run.error_message)}</div>` : ''}
+              <div class="detail-section">
+                <h4>Recent Events</h4>
+                <div class="events" id="events-${run.run_id}">Loading...</div>
+              </div>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text || '';
+      return div.innerHTML;
+    }
+
+    async function toggleRun(runId) {
+      if (expandedRuns.has(runId)) {
+        expandedRuns.delete(runId);
+      } else {
+        expandedRuns.add(runId);
+        const detail = await fetchRunDetail(runId);
+        if (detail && detail.recent_events) {
+          renderEvents(runId, detail.recent_events);
+        }
+      }
+      renderRuns(lastData);
+    }
+
+    function renderEvents(runId, events) {
+      const el = document.getElementById(`events-${runId}`);
+      if (!el) return;
+
+      if (events.length === 0) {
+        el.innerHTML = '<span style="color:#666">No events yet</span>';
+        return;
+      }
+
+      el.innerHTML = events.slice(-10).reverse().map(e => {
+        const time = new Date(e.timestamp);
+        const timeStr = time.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const dataStr = Object.entries(e.data || {}).map(([k,v]) => `${k}=${v}`).join(' ');
+        return `
+          <div class="event">
+            <span class="event-time">${timeStr}</span>
+            <span class="event-type">${e.event_type}</span>
+            <span class="event-data">${escapeHtml(dataStr)}</span>
+          </div>`;
+      }).join('');
+    }
+
+    // Initialize
+    refreshIssues();
+    fetchRuns();
+    fetchJobs();
+
+    // Poll runs every second, jobs every 3 seconds
+    setInterval(fetchRuns, 1000);
+    setInterval(fetchJobs, 3000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "id": "issue-123",
+  "identifier": "LIN-123",
+  "title": "Add user authentication flow",
+  "description": "## Background\nWe need to implement user authentication to secure the application.\n\n## Requirements\n- Email/password login\n- Password reset flow\n- Session management\n\n## Acceptance Criteria\n- [ ] User can log in with email and password\n- [ ] User can reset password via email\n- [ ] Sessions expire after 24 hours",
+  "state": {
+    "name": "Todo"
+  },
+  "priority": 2,
+  "team": {
+    "id": "team-456",
+    "name": "Engineering"
+  },
+  "project": {
+    "id": "project-789",
+    "name": "Q1 Roadmap"
+  },
+  "labels": {
+    "nodes": [
+      {"name": "feature"},
+      {"name": "auth"}
+    ]
+  },
+  "url": "https://linear.app/company/issue/LIN-123"
+}

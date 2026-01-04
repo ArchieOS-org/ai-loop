@@ -1,0 +1,139 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CritiqueResult",
+  "description": "Structured output from Codex critique (PLAN_GATE or CODE_GATE)",
+  "type": "object",
+  "properties": {
+    "confidence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Confidence score 0-100. Must be justified in feedback."
+    },
+    "approved": {
+      "type": "boolean",
+      "description": "Whether the artifact (plan or code) is approved"
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Blocking issues that MUST be resolved before approval"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Non-blocking warnings and suggestions"
+    },
+    "feedback": {
+      "type": "string",
+      "description": "Detailed feedback explaining the confidence score and assessment"
+    },
+    "diff_instructions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "location": {
+            "type": "string",
+            "description": "File path and line/section reference"
+          },
+          "change_type": {
+            "type": "string",
+            "enum": ["add", "remove", "modify", "move"],
+            "description": "Type of change needed"
+          },
+          "before": {
+            "type": "string",
+            "description": "Current state (for modify/remove). Empty string if not applicable."
+          },
+          "after": {
+            "type": "string",
+            "description": "Desired state (for add/modify). Empty string if not applicable."
+          }
+        },
+        "required": ["location", "change_type", "before", "after"],
+        "additionalProperties": false
+      },
+      "description": "Specific changes needed with location and before/after"
+    },
+    "rubric_breakdown": {
+      "type": "object",
+      "properties": {
+        "clarity_single_intent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Is the outcome aligned with the plan's single intent?"
+        },
+        "smallest_vertical_slice": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Did implementation stay minimal without scope creep?"
+        },
+        "apple_native_ux": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Are all user-visible states native and matching patterns?"
+        },
+        "single_source_of_truth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Does implementation preserve single canonical source of truth?"
+        },
+        "simplicity_subtraction": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Is code simpler than alternatives, avoiding over-engineering?"
+        },
+        "edge_cases_failure_modes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Are edge cases handled and do failures degrade gracefully?"
+        },
+        "testability_rollout_safety": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Are tests concrete, can this be rolled out and back safely?"
+        },
+        "consistency_with_patterns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Does code match repo's architecture, naming, conventions?"
+        }
+      },
+      "required": [
+        "clarity_single_intent",
+        "smallest_vertical_slice",
+        "apple_native_ux",
+        "single_source_of_truth",
+        "simplicity_subtraction",
+        "edge_cases_failure_modes",
+        "testability_rollout_safety",
+        "consistency_with_patterns"
+      ],
+      "additionalProperties": false,
+      "description": "Breakdown of scores across 8 rubric categories"
+    }
+  },
+  "required": [
+    "confidence",
+    "approved",
+    "blockers",
+    "warnings",
+    "feedback",
+    "diff_instructions",
+    "rubric_breakdown"
+  ],
+  "additionalProperties": false
+}
