@@ -8,6 +8,9 @@ let eventSource = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_DELAY = 30000; // 30s max
 
+// Track per-run last event IDs for fine-grained resume
+let lastEventIds = {};
+
 /**
  * Connect to SSE endpoint
  */
@@ -15,9 +18,10 @@ function connectSSE() {
   const state = Store.getState();
   let url = '/api/events';
 
-  // Add replay parameter if we have a last event ID
-  if (state.lastEventId) {
-    url += `?since=${encodeURIComponent(state.lastEventId)}`;
+  // Build combined last event ID from tracked per-run IDs
+  const combinedIds = Object.values(lastEventIds).filter(Boolean).join(',');
+  if (combinedIds) {
+    url += `?since=${encodeURIComponent(combinedIds)}`;
   }
 
   Store.setState({ connected: false });
@@ -62,7 +66,12 @@ function connectSSE() {
       Store.setState({ runs });
     }
 
-    // Track last event ID for replay
+    // Track per-run last event IDs for fine-grained resume
+    if (data.lastEventIds) {
+      lastEventIds = { ...lastEventIds, ...data.lastEventIds };
+    }
+
+    // Track combined last event ID for legacy support
     if (data.lastEventId) {
       Store.setState({ lastEventId: data.lastEventId });
     }
@@ -210,13 +219,131 @@ function connectSSE() {
 
     updateLastEventId(e);
   });
+
+  // Handle timeline event (canonical v2 events)
+  eventSource.addEventListener('timeline', (e) => {
+    const event = JSON.parse(e.data);
+    const runId = event.run_id;
+
+    // run.output events UPSERT into phase output card (not append)
+    if (event.kind === 'run.output') {
+      const stepSection = {
+        ts: event.ts,
+        step: event.payload.step,
+        text: event.payload.text,
+        duration_s: event.payload.duration_s,
+        char_count: event.payload.char_count
+      };
+      Store.upsertPhaseOutput(runId, event.phase, stepSection);
+
+      // Notify Timeline component if it's watching this run
+      if (window.Timeline && runId === window.Timeline.currentRunId) {
+        window.Timeline.upsertPhaseOutputCard(runId, event.phase);
+      }
+    } else {
+      // All other events append normally
+      Store.appendTimelineEntry(runId, event);
+
+      // Notify Timeline component
+      if (window.Timeline && runId === window.Timeline.currentRunId) {
+        window.Timeline.appendEntryNode(event);
+      }
+    }
+
+    // Handle run:created - also update runs Map for run list
+    if (event.kind === 'run.created') {
+      const issueId = event.payload?.issue_identifier;
+      const state = Store.getState();
+
+      // Check for existing stub
+      const stub = state.runs.get(issueId);
+      if (stub && stub.is_stub) {
+        console.log('[SSE] Reconciling stub:', issueId, '→', runId);
+        const preservedState = { approval_mode: stub.approval_mode };
+        const wasSelected = state.selectedRunId === issueId;
+
+        Store.deleteRun(issueId);
+        Store.updateRun(runId, {
+          run_id: runId,
+          issue_identifier: issueId,
+          status: 'pending',
+          ...preservedState,
+          is_stub: false,
+          iteration: 0,
+          confidence: null,
+          started_at: new Date().toISOString(),
+          completed_at: null,
+          gate_pending: null,
+        });
+
+        if (wasSelected) {
+          Store.setState({ selectedRunId: runId });
+        }
+      } else if (!state.runs.has(runId)) {
+        Store.updateRun(runId, {
+          run_id: runId,
+          issue_identifier: issueId,
+          status: 'pending',
+          approval_mode: Store.getState().globalApprovalMode,
+          iteration: 0,
+          confidence: null,
+          started_at: new Date().toISOString(),
+          completed_at: null,
+          gate_pending: null,
+        });
+      }
+    }
+
+    // Handle run.milestone for completion
+    if (event.kind === 'run.milestone' && event.payload?.milestone_name?.startsWith('run_')) {
+      const status = event.payload.milestone_name.replace('run_', '');
+      Store.updateRun(runId, {
+        status: status,
+        completed_at: new Date().toISOString(),
+        gate_pending: null,
+      });
+    }
+
+    // Handle run.gate for pending gates
+    if (event.kind === 'run.gate' && event.payload?.pending) {
+      Store.updateRun(runId, {
+        gate_pending: {
+          gate_type: event.payload.gate_type,
+          critique: event.payload.critique,
+        },
+      });
+
+      // Auto-select this run if none selected
+      if (!Store.getState().selectedRunId) {
+        Store.setState({ selectedRunId: runId });
+      }
+    }
+
+    // Update gate results (confidence, blockers)
+    if (event.kind === 'run.gate' && event.payload?.confidence !== undefined) {
+      Store.updateRun(runId, {
+        confidence: event.payload.confidence,
+      });
+    }
+
+    updateLastEventId(e);
+  });
 }
 
 /**
  * Update last event ID for replay semantics
+ * @param {Event} event - SSE event with lastEventId
  */
 function updateLastEventId(event) {
   if (event.lastEventId) {
+    // Parse run_id:line format to update per-run tracking
+    const parts = event.lastEventId.split(':');
+    if (parts.length >= 2) {
+      const runId = parts.slice(0, -1).join(':');  // Handle run IDs with colons
+      lastEventIds[runId] = event.lastEventId;
+    }
+
+    // Also update store for legacy support
     Store.setState({ lastEventId: event.lastEventId });
   }
 }

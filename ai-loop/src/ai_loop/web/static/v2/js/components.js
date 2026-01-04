@@ -502,6 +502,66 @@ function setupIssuePicker() {
   let issues = [];
   let selectedIssues = new Set();
 
+  // Part C: Listen for readiness events
+  window.addEventListener('onboarding:ready', () => {
+    updateStartButton();
+    hideConnectionError();
+  });
+
+  window.addEventListener('onboarding:failed', (e) => {
+    updateStartButton();
+    showConnectionError(e.detail?.message || 'Connection failed');
+  });
+
+  // Part D: Connection error banner with retry (no inline handlers)
+  function showConnectionError(message) {
+    let banner = document.getElementById('connection-error');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'connection-error';
+      banner.className = 'error-banner';
+      banner.style.cssText = `
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        padding: 0.75rem 1rem;
+        background: var(--color-error-bg, #2d1f1f);
+        border: 1px solid var(--color-error, #ff6b6b);
+        border-radius: 6px;
+        margin-bottom: 1rem;
+        color: var(--color-error, #ff6b6b);
+      `;
+
+      const msgSpan = document.createElement('span');
+      msgSpan.className = 'error-message';
+      msgSpan.style.flex = '1';
+
+      const retryBtn = document.createElement('button');
+      retryBtn.className = 'btn btn-sm';
+      retryBtn.textContent = 'Retry';
+      retryBtn.style.cssText = `
+        padding: 0.25rem 0.75rem;
+        background: var(--color-error, #ff6b6b);
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      `;
+      retryBtn.addEventListener('click', () => Onboarding.retry());
+
+      banner.appendChild(msgSpan);
+      banner.appendChild(retryBtn);
+      picker?.parentElement?.prepend(banner);
+    }
+    banner.querySelector('.error-message').textContent = message;
+    banner.style.display = 'flex';
+  }
+
+  function hideConnectionError() {
+    const banner = document.getElementById('connection-error');
+    if (banner) banner.style.display = 'none';
+  }
+
   // Toggle collapse
   toggle.addEventListener('click', () => {
     picker.classList.toggle('collapsed');
@@ -535,61 +595,77 @@ function setupIssuePicker() {
 
   // Start runs
   startBtn.addEventListener('click', async () => {
+    console.log('[Start] clicked, selected:', Array.from(selectedIssues));
     if (selectedIssues.size === 0) return;
+
+    // Defensive: if somehow clicked while not ready, await readiness
+    if (!Onboarding.isReady()) {
+      await Onboarding.ready();
+      if (!Onboarding.isReady()) {
+        showNotification('Not connected. Click Retry.', 'error');
+        return;
+      }
+    }
 
     startBtn.disabled = true;
     startBtn.textContent = 'Starting...';
 
     try {
-      const csrfToken = document.getElementById('csrf-token')?.value || '';
-      const response = await fetch('/api/runs', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-CSRF-Token': csrfToken,
-        },
-        body: JSON.stringify({
-          issue_identifiers: Array.from(selectedIssues),
-          approval_mode: Store.getState().globalApprovalMode || 'auto',
-        }),
+      console.log('[Start] CSRF token:', Onboarding.getCsrfToken());
+      console.log('[Start] Pairing token:', Onboarding.getPairingToken());
+      // Use securePost (handles 403 retry with fresh token)
+      const response = await Onboarding.securePost('/api/runs', {
+        issue_identifiers: Array.from(selectedIssues),
+        approval_mode: Store.getState().globalApprovalMode || 'auto',
       });
+      console.log('[Start] Response:', response.status, response.ok);
+
+      // Handle non-2xx responses
+      if (!response.ok) {
+        const text = await response.text();
+        console.error('[Start] Error response:', response.status, text);
+        showNotification(`Start failed (${response.status}): ${text || 'Unknown error'}`, 'error');
+        return;
+      }
 
       const result = await response.json();
+      console.log('[Start] Result:', result);
 
       if (result.error) {
-        console.error('[IssuePicker] Start error:', result.error);
+        console.error('[Start] API error:', result.error);
         showNotification(`Start failed: ${result.error}`, 'error');
-      } else {
-        // IMMEDIATELY add pending stubs to UI (keyed by temp_id = issue_identifier)
-        if (result.stubs) {
-          for (const stub of result.stubs) {
-            // Store under temp_id (issue_identifier) - will be reconciled later
-            Store.updateRun(stub.temp_id, {
-              run_id: stub.temp_id,  // Temporary - SSE will provide real run_id
-              issue_identifier: stub.issue_identifier,
-              status: 'pending',
-              is_stub: true,  // Flag for reconciliation
-              approval_mode: Store.getState().globalApprovalMode || 'auto',
-              started_at: new Date().toISOString(),
-            });
-          }
-          Components.renderRunList();
-        }
-
-        // Show rejection reasons if any
-        if (result.rejected && result.rejected.length > 0) {
-          const reasons = result.rejected.map(id =>
-            `${id}: ${result.reason_by_issue[id] || 'already running'}`
-          ).join('\n');
-          showNotification(`Some issues skipped:\n${reasons}`, 'warning');
-        }
-
-        // Clear selection on success
-        selectedIssues.clear();
-        renderIssueList();
+        return;
       }
+
+      // Success: add stubs to UI
+      if (result.stubs) {
+        for (const stub of result.stubs) {
+          Store.updateRun(stub.temp_id, {
+            run_id: stub.temp_id,
+            issue_identifier: stub.issue_identifier,
+            status: 'pending',
+            is_stub: true,
+            approval_mode: Store.getState().globalApprovalMode || 'auto',
+            started_at: new Date().toISOString(),
+          });
+        }
+        Components.renderRunList();
+      }
+
+      // Show warnings for rejected issues
+      if (result.rejected?.length > 0) {
+        const reasons = result.rejected.map(id =>
+          `${id}: ${result.reason_by_issue?.[id] || 'already running'}`
+        ).join('\n');
+        showNotification(`Some issues skipped:\n${reasons}`, 'warning');
+      }
+
+      // Clear selection on success
+      selectedIssues.clear();
+      renderIssueList();
+
     } catch (error) {
-      console.error('[IssuePicker] Start failed:', error);
+      console.error('[Start] Exception:', error);
       showNotification(`Network error: ${error.message}`, 'error');
     } finally {
       updateStartButton();
@@ -663,8 +739,22 @@ function setupIssuePicker() {
 
   function updateStartButton() {
     const count = selectedIssues.size;
-    startBtn.disabled = count === 0;
+    const ready = Onboarding.isReady();
+
+    // Disabled if no selection OR not ready
+    startBtn.disabled = count === 0 || !ready;
+
+    // Update text
     startBtn.textContent = count > 0 ? `Start (${count})` : 'Start';
+
+    // Update title for accessibility
+    if (!ready && Onboarding.getError()) {
+      startBtn.title = 'Reconnecting...';
+    } else if (count === 0) {
+      startBtn.title = 'Select issues to start';
+    } else {
+      startBtn.title = '';
+    }
   }
 
   // Load issues on init

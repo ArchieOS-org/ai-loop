@@ -20,6 +20,11 @@ const initialState = {
   // Output buffers (separate for memory efficiency, max 1000 lines per run)
   outputBuffers: new Map(),
 
+  // Timeline state (v2) - plain objects, serializable
+  timelinesByRunId: {},     // { [runId]: TimelineEntry[] }
+  collapsedById: {},        // { [entryId]: boolean }
+  userAtBottom: true,       // For auto-scroll logic
+
   // UI state
   selectedRunId: null,
   activeTab: 'output', // 'output' | 'files' | 'critique'
@@ -245,6 +250,131 @@ function loadPersistedState() {
   }
 }
 
+// ============================================================================
+// Timeline State Management (v2)
+// ============================================================================
+
+/**
+ * Append a timeline entry for a run
+ * @param {string} runId - The run ID
+ * @param {object} entry - The timeline entry (canonical event envelope)
+ */
+function appendTimelineEntry(runId, entry) {
+  const timelines = { ...state.timelinesByRunId };
+  if (!timelines[runId]) {
+    timelines[runId] = [];
+  }
+  // Prevent duplicates by checking ID
+  if (timelines[runId].some(e => e.id === entry.id)) {
+    return; // Already exists
+  }
+  timelines[runId] = [...timelines[runId], entry];
+  setState({ timelinesByRunId: timelines });
+  notifySubscribers('entry:added', { runId, entry }, null);
+}
+
+/**
+ * Upsert phase output - ONE card per phase, multiple steps inside.
+ * Called for run.output events instead of appendTimelineEntry.
+ * @param {string} runId - The run ID
+ * @param {string} phase - The phase (planning, implementation, fixing)
+ * @param {object} stepSection - Step data { ts, step, text, duration_s, char_count }
+ */
+function upsertPhaseOutput(runId, phase, stepSection) {
+  const phaseOutputId = `output:${runId}:${phase}`;
+  const timelines = { ...state.timelinesByRunId };
+
+  if (!timelines[runId]) {
+    timelines[runId] = [];
+  }
+
+  // Find existing phase output entry
+  const existingIndex = timelines[runId].findIndex(e => e.id === phaseOutputId);
+
+  if (existingIndex >= 0) {
+    // Update existing - append step section
+    const existing = timelines[runId][existingIndex];
+    const updatedEntry = {
+      ...existing,
+      payload: {
+        ...existing.payload,
+        steps: [...(existing.payload.steps || []), stepSection]
+      }
+    };
+    timelines[runId] = [
+      ...timelines[runId].slice(0, existingIndex),
+      updatedEntry,
+      ...timelines[runId].slice(existingIndex + 1)
+    ];
+    setState({ timelinesByRunId: timelines });
+    notifySubscribers('entry:updated', { runId, entry: updatedEntry }, null);
+  } else {
+    // Create new phase output entry
+    const phaseEntry = {
+      id: phaseOutputId,
+      ts: stepSection.ts,
+      run_id: runId,
+      kind: 'run.phase_output',
+      phase: phase,
+      severity: 'info',
+      title: `${phase.charAt(0).toUpperCase() + phase.slice(1)} Output`,
+      payload: {
+        steps: [stepSection]
+      }
+    };
+    timelines[runId] = [...timelines[runId], phaseEntry];
+    setState({ timelinesByRunId: timelines });
+    notifySubscribers('entry:added', { runId, entry: phaseEntry }, null);
+  }
+}
+
+/**
+ * Get timeline entries for a run
+ * @param {string} runId - The run ID
+ * @returns {Array} Timeline entries
+ */
+function getTimelineEntries(runId) {
+  return state.timelinesByRunId[runId] || [];
+}
+
+/**
+ * Toggle collapsed state for a timeline entry
+ * @param {string} entryId - The entry ID
+ */
+function toggleCollapsed(entryId) {
+  const collapsed = { ...state.collapsedById };
+  collapsed[entryId] = !collapsed[entryId];
+  setState({ collapsedById: collapsed });
+  notifySubscribers('collapsed:changed', { entryId }, null);
+}
+
+/**
+ * Check if an entry is collapsed
+ * @param {string} entryId - The entry ID
+ * @returns {boolean}
+ */
+function isCollapsed(entryId) {
+  return state.collapsedById[entryId] || false;
+}
+
+/**
+ * Set user scroll position state
+ * @param {boolean} atBottom - Whether user is scrolled to bottom
+ */
+function setUserAtBottom(atBottom) {
+  setState({ userAtBottom: atBottom });
+}
+
+/**
+ * Clear timeline for a run (for reconnect scenarios)
+ * @param {string} runId - The run ID
+ */
+function clearTimeline(runId) {
+  const timelines = { ...state.timelinesByRunId };
+  timelines[runId] = [];
+  setState({ timelinesByRunId: timelines });
+}
+
 // Export store API
 window.Store = {
   getState,
@@ -259,4 +389,12 @@ window.Store = {
   deleteRun,
   persistUIState,
   loadPersistedState,
+  // Timeline methods (v2)
+  appendTimelineEntry,
+  upsertPhaseOutput,
+  getTimelineEntries,
+  toggleCollapsed,
+  isCollapsed,
+  setUserAtBottom,
+  clearTimeline,
 };

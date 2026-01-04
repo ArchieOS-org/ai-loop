@@ -286,11 +286,18 @@ class PipelineOrchestrator:
             term_log("PLANNING", "Generating plan with Claude...")
 
             # Generate initial plan
-            plan_content = await self.claude.generate_plan(safe_issue, ctx.repo_root)
+            plan_content, elapsed = await self.claude.generate_plan(safe_issue, ctx.repo_root)
             ctx.current_iteration = 1
             plan = PlanVersion(version=1, content=plan_content)
             ctx.plan_versions.append(plan)
             self.artifacts.write_plan(ctx, 1, plan_content)
+            log("claude_completed", {
+                "phase": "planning",
+                "step": "generate_plan",
+                "output": plan_content,
+                "duration_s": elapsed,
+                "char_count": len(plan_content),
+            })
             log("plan_generated", {"version": 1})
 
             # === PLAN_GATE LOOP ===
@@ -374,7 +381,7 @@ class PipelineOrchestrator:
                 human_feedback = ctx.human_feedback
                 ctx.human_feedback = ""  # Clear after use
 
-                refined = await self.claude.refine_plan(
+                refined, elapsed = await self.claude.refine_plan(
                     safe_issue,
                     ctx.plan_versions[-1].content,
                     critique,
@@ -385,6 +392,13 @@ class PipelineOrchestrator:
                 plan = PlanVersion(version=ctx.current_iteration, content=refined)
                 ctx.plan_versions.append(plan)
                 self.artifacts.write_plan(ctx, ctx.current_iteration, refined)
+                log("claude_completed", {
+                    "phase": "planning",
+                    "step": "refine_plan",
+                    "output": refined,
+                    "duration_s": elapsed,
+                    "char_count": len(refined),
+                })
                 log("plan_refined", {"version": ctx.current_iteration})
 
             # Check if we exhausted iterations
@@ -399,8 +413,15 @@ class PipelineOrchestrator:
                 log("implementation_started")
                 term_log("IMPLEMENTING", "Claude implementing final plan...")
 
-                implement_log = await self.claude.implement(ctx.final_plan, ctx)
+                implement_log, elapsed = await self.claude.implement(ctx.final_plan, ctx)
                 self.artifacts.write_implement_log(ctx, implement_log)
+                log("claude_completed", {
+                    "phase": "implementation",
+                    "step": "implement",
+                    "output": implement_log,
+                    "duration_s": elapsed,
+                    "char_count": len(implement_log),
+                })
                 log("implementation_completed")
 
                 # === CODE_GATE LOOP ===
@@ -470,13 +491,20 @@ class PipelineOrchestrator:
                             human_feedback = ctx.human_feedback
                             ctx.human_feedback = ""
 
-                            fix_log = await self.claude.fix_code(
+                            fix_log, elapsed = await self.claude.fix_code(
                                 ctx.final_plan,
                                 critique,
                                 ctx,
                                 human_feedback=human_feedback,
                             )
                             self.artifacts.write_fix_log(ctx, fix_iteration, fix_log)
+                            log("claude_completed", {
+                                "phase": "fixing",
+                                "step": "fix",
+                                "output": fix_log,
+                                "duration_s": elapsed,
+                                "char_count": len(fix_log),
+                            })
                             log("fix_applied", {"iteration": fix_iteration})
                         else:
                             ctx.status = RunStatus.FAILED

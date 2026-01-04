@@ -35,8 +35,8 @@ class ClaudeRunner:
         prompt: str,
         cwd: Path | None = None,
         timeout: int = 300,
-    ) -> tuple[str, str]:
-        """Run Claude CLI with prompt via stdin, return (stdout, stderr)."""
+    ) -> tuple[str, str, float]:
+        """Run Claude CLI with prompt via stdin, return (stdout, stderr, elapsed_seconds)."""
         log("CLAUDE", f"Invoking: {self.cmd} --print -p <prompt>")
         log("CLAUDE", f"Working dir: {cwd}")
         log("CLAUDE", f"Timeout: {timeout}s")
@@ -70,19 +70,19 @@ class ClaudeRunner:
             )
 
         log("CLAUDE", f"Completed in {elapsed:.1f}s, output: {len(stdout)} chars")
-        return stdout.decode(), stderr.decode()
+        return stdout.decode(), stderr.decode(), elapsed
 
     async def generate_plan(
         self,
         issue: LinearIssue,
         repo_root: Path,
-    ) -> str:
-        """Generate initial implementation plan."""
+    ) -> tuple[str, float]:
+        """Generate initial implementation plan. Returns (plan_content, elapsed_seconds)."""
         template = self._load_prompt("claude_planner")
         issue_pack = issue.to_issue_pack()
         prompt = f"{template}\n\n---\n\n{issue_pack}"
-        stdout, _ = await self._run_claude(prompt, cwd=repo_root, timeout=600)
-        return stdout
+        stdout, _, elapsed = await self._run_claude(prompt, cwd=repo_root, timeout=600)
+        return stdout, elapsed
 
     async def refine_plan(
         self,
@@ -92,8 +92,8 @@ class ClaudeRunner:
         version: int,
         repo_root: Path,
         human_feedback: str = "",
-    ) -> str:
-        """Refine plan based on critique feedback."""
+    ) -> tuple[str, float]:
+        """Refine plan based on critique feedback. Returns (plan_content, elapsed_seconds)."""
         template = self._load_prompt("claude_refiner")
         issue_pack = issue.to_issue_pack()
 
@@ -146,15 +146,15 @@ class ClaudeRunner:
 {critique_text}
 {human_feedback_section}
 """
-        stdout, _ = await self._run_claude(prompt, cwd=repo_root, timeout=600)
-        return stdout
+        stdout, _, elapsed = await self._run_claude(prompt, cwd=repo_root, timeout=600)
+        return stdout, elapsed
 
     async def implement(
         self,
         final_plan: str,
         ctx: RunContext,
-    ) -> str:
-        """Implement the final plan in the working directory."""
+    ) -> tuple[str, float]:
+        """Implement the final plan in the working directory. Returns (output, elapsed_seconds)."""
         template = self._load_prompt("claude_implementer")
         working_dir = ctx.working_dir()
 
@@ -175,8 +175,8 @@ class ClaudeRunner:
 - Run tests after implementation
 - Do NOT expand scope beyond the plan
 """
-        stdout, _ = await self._run_claude(prompt, cwd=working_dir, timeout=600)
-        return stdout
+        stdout, _, elapsed = await self._run_claude(prompt, cwd=working_dir, timeout=600)
+        return stdout, elapsed
 
     async def fix_code(
         self,
@@ -184,8 +184,8 @@ class ClaudeRunner:
         critique: CritiqueResult,
         ctx: RunContext,
         human_feedback: str = "",
-    ) -> str:
-        """Fix code based on CODE_GATE critique."""
+    ) -> tuple[str, float]:
+        """Fix code based on CODE_GATE critique. Returns (output, elapsed_seconds)."""
         template = self._load_prompt("claude_implementer")
         working_dir = ctx.working_dir()
 
@@ -230,5 +230,5 @@ class ClaudeRunner:
 - Preserve existing intent
 - Run tests after fixes
 """
-        stdout, _ = await self._run_claude(prompt, cwd=working_dir, timeout=600)
-        return stdout
+        stdout, _, elapsed = await self._run_claude(prompt, cwd=working_dir, timeout=600)
+        return stdout, elapsed

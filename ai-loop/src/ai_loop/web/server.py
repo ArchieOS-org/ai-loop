@@ -8,9 +8,11 @@ import secrets
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
+from http.cookies import SimpleCookie
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingMixIn
@@ -18,6 +20,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from ai_loop.core.logging import is_high_signal, log
+from ai_loop.web.security import SecurityManager, parse_cookies, validate_mutating_request
 
 
 # ---------------------------------------------------------------------------
@@ -122,12 +125,14 @@ UI_VERSION = os.environ.get("AI_LOOP_UI_VERSION", "v1")
 class DashboardHandler(SimpleHTTPRequestHandler):
     """Handler for dashboard API and static files."""
 
-    # Class-level config (set by run_server)
+    # Class-level config (set by run_server or create_server)
     artifacts_dir: Path = Path("artifacts")
     repo_root: Path = Path(".")
-    enable_writes: bool = False
+    enable_writes: bool = True
     csrf_token: str = ""
     port: int = 8080
+    dev_mode: bool = False
+    security: SecurityManager | None = None
 
     # Static directory for serving files
     _static_dir: str = ""
@@ -136,7 +141,23 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         # Set static dir before super().__init__ can set self.directory to cwd
         if not DashboardHandler._static_dir:
             DashboardHandler._static_dir = str(Path(__file__).parent / "static")
+        self._cookies: dict[str, str] | None = None  # Parsed on demand
         super().__init__(*args, directory=DashboardHandler._static_dir, **kwargs)
+
+    @property
+    def cookies(self) -> dict[str, str]:
+        """Parse cookies from Cookie header (lazy, cached per request)."""
+        if self._cookies is None:
+            self._cookies = parse_cookies(self)
+        return self._cookies
+
+    def end_headers(self):
+        """Add no-cache headers in dev mode."""
+        if self.dev_mode:
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+        super().end_headers()
 
     def _check_host(self) -> bool:
         """Strict host check - exact match only."""
@@ -159,9 +180,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         return True
 
     def _check_csrf(self) -> bool:
-        """Verify CSRF token for POST requests."""
+        """Verify CSRF token (synchronizer pattern)."""
         token = self.headers.get("X-CSRF-Token", "")
-        if token != self.csrf_token:
+
+        # Get expected token from SecurityManager (preferred) or class attr
+        if self.security:
+            expected = self.security.csrf_token
+        else:
+            expected = self.csrf_token
+
+        if not secrets.compare_digest(token, expected):
             self._send_json({"error": "invalid csrf token"}, 403)
             return False
         return True
@@ -190,10 +218,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return False
 
     def do_GET(self):
+        self._cookies = None  # Reset cookies cache for each request
         if not self._check_host():
             return
         if self.path == "/" or self.path == "/index.html":
             self._send_index_with_token()
+        elif self.path == "/api/status":
+            self._handle_status()
+        elif self.path == "/api/session":
+            self._handle_session()
         elif self.path.startswith("/api/events"):
             self._handle_sse()
         elif self.path.startswith("/api/issues"):
@@ -216,7 +249,41 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         else:
             super().do_GET()
 
+    def _handle_status(self):
+        """GET /api/status - Return server ready status.
+
+        Used by:
+        - Frontend to detect server restarts (polling)
+        - wait_for_ready() in dev mode to probe before opening browser
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"ready": True}).encode())
+
+    def _handle_session(self):
+        """GET /api/session - Return current CSRF token (no rotation).
+
+        Synchronizer token model: returns stable token, no cookie.
+        """
+        if self.security:
+            csrf_token = self.security.get_csrf_token()
+            paired = self.security.paired
+        else:
+            csrf_token = self.csrf_token
+            paired = True
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        # NO Set-Cookie - synchronizer token model, not double-submit
+        self.end_headers()
+        self.wfile.write(json.dumps({
+            "paired": paired,
+            "csrf": csrf_token,
+        }).encode())
+
     def do_POST(self):
+        self._cookies = None  # Reset cookies cache for each request
         if not self._check_host():
             return
         if not self._check_origin():
@@ -225,6 +292,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/api/runs":
             self._start_runs()
+        elif self.path == "/api/jobs/stop-all":
+            self._stop_all_jobs()
         elif self.path.startswith("/api/jobs/") and self.path.endswith("/stop"):
             job_id = self.path.split("/")[-2]
             self._stop_job(job_id)
@@ -245,14 +314,18 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._update_run_config(run_id)
         elif self.path == "/api/projects/switch":
             self._switch_project()
+        elif self.path == "/api/mode":
+            self._set_mode()
 
     def _send_index_with_token(self) -> None:
         """Serve index.html with CSRF token injected."""
         # Route to v2 if UI_VERSION is set
         if UI_VERSION == "v2":
             index_path = Path(__file__).parent / "static" / "v2" / "index.html"
+            print(f"[UI] Serving v2 UI from {index_path}")
         else:
             index_path = Path(__file__).parent / "static" / "index.html"
+            print(f"[UI] Serving v1 UI from {index_path} (UI_VERSION={UI_VERSION})")
         html = index_path.read_text()
         # Inject token and mode
         html = html.replace("{{CSRF_TOKEN}}", self.csrf_token)
@@ -278,14 +351,30 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         """GET /api/events - Server-Sent Events stream.
 
         Tails trace.jsonl files for active runs.
-        Supports replay via ?since=run_id:line_number
+        Supports replay via:
+        - Last-Event-ID header (standard SSE reconnect)
+        - ?since=run_id:line_number query param (legacy)
         """
         params = parse_qs(urlparse(self.path).query)
         since = params.get("since", [None])[0]
 
-        # Parse replay position
+        # Check Last-Event-ID header first (standard SSE reconnect)
+        last_event_id = self.headers.get("Last-Event-ID", "")
+
+        # Parse replay positions from either source
         replay_positions: dict[str, int] = {}
-        if since:
+
+        # Prefer Last-Event-ID header (comma-separated run_id:line pairs)
+        if last_event_id:
+            for pos in last_event_id.split(","):
+                if ":" in pos:
+                    run_id, line_str = pos.rsplit(":", 1)
+                    try:
+                        replay_positions[run_id] = int(line_str)
+                    except ValueError:
+                        pass
+        elif since:
+            # Fallback to query param
             for pos in since.split(","):
                 if ":" in pos:
                     run_id, line_str = pos.rsplit(":", 1)
@@ -346,7 +435,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
                                 try:
                                     event = json.loads(line)
-                                    sse_event = self._trace_event_to_sse(run_id, event)
+                                    sse_event = self._trace_event_to_sse(run_id, event, current_line)
                                     if sse_event:
                                         event_type, event_data = sse_event
                                         event_data["_line"] = current_line
@@ -379,6 +468,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def _build_sse_init(self) -> dict:
         """Build initial state for SSE init event."""
         runs = []
+        last_event_ids = {}  # Track last event ID per run
+
         if self.artifacts_dir.exists():
             for run_dir in sorted(self.artifacts_dir.iterdir(), reverse=True):
                 if not run_dir.is_dir():
@@ -390,9 +481,20 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     data = json.loads(summary_path.read_text())
                     if data.get("hidden_at"):
                         continue
+                    run_id = data.get("run_id", run_dir.name)
+
+                    # Count lines in trace file for last event ID
+                    trace_path = run_dir / "trace.jsonl"
+                    if trace_path.exists():
+                        try:
+                            line_count = sum(1 for _ in open(trace_path))
+                            last_event_ids[run_id] = f"{run_id}:{line_count}"
+                        except IOError:
+                            pass
+
                     # Map to run shape expected by UI
                     runs.append({
-                        "run_id": data.get("run_id", run_dir.name),
+                        "run_id": run_id,
                         "issue_identifier": data.get("issue_identifier", ""),
                         "issue_title": data.get("issue_title", ""),
                         "status": data.get("status", "unknown"),
@@ -406,9 +508,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 except (json.JSONDecodeError, IOError):
                     continue
 
+        # Combine all last event IDs for resume
+        combined_last_event_id = ",".join(last_event_ids.values()) if last_event_ids else None
+
         return {
             "mode": "write_enabled" if self.enable_writes else "dry_run",
             "runs": runs[:100],  # Max 100 runs in init
+            "lastEventId": combined_last_event_id,
+            "lastEventIds": last_event_ids,  # Per-run IDs for fine-grained resume
         }
 
     def _get_gate_pending(self, run_dir: Path) -> dict | None:
@@ -438,51 +545,248 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 file_positions[run_id] = trace_path.stat().st_size
                 file_positions[f"{run_id}_line"] = sum(1 for _ in open(trace_path))
 
-    def _trace_event_to_sse(self, run_id: str, event: dict) -> tuple[str, dict] | None:
-        """Convert a trace event to an SSE event type and data."""
-        event_type = event.get("event_type", event.get("type", ""))
+    def _to_canonical_event(self, run_id: str, trace_event: dict, line_number: int) -> dict:
+        """Transform legacy trace event to canonical envelope.
 
-        if event_type == "run_started":
+        Args:
+            run_id: The run ID
+            trace_event: Raw event from trace.jsonl
+            line_number: Line number in trace file (for stable ID)
+
+        Returns:
+            Canonical event envelope for timeline UI
+        """
+        event_type = trace_event.get("event", trace_event.get("event_type", trace_event.get("type", "")))
+        data = trace_event.get("data", {})
+
+        # Stable ID from trace identity (line number + run_id)
+        stable_id = f"{run_id}:{line_number}"
+
+        # Preserve trace timestamp (when event actually happened)
+        trace_ts = trace_event.get("timestamp")
+        missing_timestamp = False
+        if trace_ts:
+            try:
+                ts_ms = int(datetime.fromisoformat(trace_ts.replace("Z", "+00:00")).timestamp() * 1000)
+            except (ValueError, AttributeError):
+                ts_ms = int(time.time() * 1000)
+                missing_timestamp = True
+        else:
+            ts_ms = int(time.time() * 1000)
+            missing_timestamp = True
+
+        envelope = {
+            "id": stable_id,
+            "ts": ts_ms,
+            "ingest_ts": int(time.time() * 1000),
+            "run_id": run_id,
+            "kind": "run.system",
+            "phase": None,
+            "severity": "warn" if missing_timestamp else "info",
+            "title": "[Missing timestamp] " if missing_timestamp else "",
+            "payload": {}
+        }
+
+        # Map legacy events to canonical kinds
+        if event_type == "pipeline_started":
+            envelope["kind"] = "run.created"
+            envelope["title"] = f"Run started for {data.get('issue', '')}"
+            envelope["payload"] = {"issue_identifier": data.get("issue")}
+
+        elif event_type in ("planning_started", "implementation_started", "fixing_started"):
+            phase = event_type.replace("_started", "")
+            envelope["kind"] = "run.phase"
+            envelope["phase"] = phase
+            envelope["title"] = f"{phase.title()} phase started"
+
+        elif event_type == "claude_completed":
+            envelope["kind"] = "run.output"
+            envelope["phase"] = data.get("phase")
+            step = data.get("step", "unknown")
+            char_count = data.get("char_count", 0)
+            envelope["title"] = f"{step.replace('_', ' ').title()} ({char_count} chars)"
+            envelope["payload"] = {
+                "text": data.get("output", ""),
+                "duration_s": data.get("duration_s"),
+                "char_count": char_count,
+                "step": step
+            }
+
+        elif event_type in ("plan_generated", "plan_refined"):
+            envelope["kind"] = "run.artifact"
+            version = data.get("version", 1)
+            envelope["title"] = f"Plan v{version}"
+            envelope["payload"] = {"type": "plan", "version": version, "path": data.get("path")}
+
+        elif event_type in ("plan_gate_result", "code_gate_result"):
+            envelope["kind"] = "run.gate"
+            gate_type = "plan" if "plan" in event_type else "code"
+            approved = data.get("approved", False)
+            envelope["severity"] = "info" if approved else "warn"
+            envelope["title"] = f"{gate_type.title()} gate: {'Approved' if approved else 'Blocked'}"
+            envelope["payload"] = {
+                "gate_type": gate_type,
+                "confidence": data.get("confidence"),
+                "approved": approved,
+                "blockers": data.get("blockers", []),
+                "warnings": data.get("warnings", [])
+            }
+
+        elif event_type == "plan_approved":
+            envelope["kind"] = "run.milestone"
+            envelope["title"] = "Plan approved"
+            envelope["payload"] = {"milestone_name": "plan_approved"}
+
+        elif event_type == "pipeline_completed":
+            envelope["kind"] = "run.milestone"
+            status = data.get("status", "unknown")
+            envelope["severity"] = "error" if status == "failed" else "info"
+            envelope["title"] = f"Run {status}"
+            envelope["payload"] = {"milestone_name": f"run_{status}"}
+
+        elif event_type == "gate_pending":
+            envelope["kind"] = "run.gate"
+            envelope["title"] = f"Gate pending: {data.get('gate_type', 'unknown')}"
+            envelope["severity"] = "warn"
+            envelope["payload"] = {
+                "gate_type": data.get("gate_type", ""),
+                "pending": True,
+                "critique": data.get("critique", {})
+            }
+
+        elif event_type == "gate_resolved":
+            envelope["kind"] = "run.milestone"
+            action = data.get("action", "unknown")
+            envelope["title"] = f"Gate resolved: {action}"
+            envelope["payload"] = {"milestone_name": f"gate_{action}", "feedback": data.get("feedback", "")}
+
+        elif event_type == "pipeline_error":
+            envelope["kind"] = "run.system"
+            envelope["severity"] = "error"
+            envelope["title"] = f"Error: {data.get('error', 'Unknown error')[:50]}"
+            envelope["payload"] = {"message": data.get("error", "")}
+
+        elif event_type in ("plan_gate_started", "code_gate_started"):
+            gate_type = "plan" if "plan" in event_type else "code"
+            envelope["kind"] = "run.system"
+            envelope["title"] = f"{gate_type.title()} gate started"
+            envelope["payload"] = {"iteration": data.get("iteration")}
+
+        elif event_type in ("plan_gate_passed", "code_gate_passed"):
+            gate_type = "plan" if "plan" in event_type else "code"
+            envelope["kind"] = "run.milestone"
+            envelope["title"] = f"{gate_type.title()} gate passed"
+            envelope["payload"] = {"stable_count": data.get("stable_count")}
+
+        elif event_type in ("plan_gate_failed", "code_gate_failed"):
+            gate_type = "plan" if "plan" in event_type else "code"
+            envelope["kind"] = "run.system"
+            envelope["severity"] = "warn"
+            envelope["title"] = f"{gate_type.title()} gate failed"
+            envelope["payload"] = {"blockers": data.get("blockers", [])}
+
+        elif event_type == "implementation_completed":
+            envelope["kind"] = "run.milestone"
+            envelope["title"] = "Implementation completed"
+            envelope["payload"] = {"milestone_name": "implementation_completed"}
+
+        elif event_type in ("worktree_created", "branch_created"):
+            envelope["kind"] = "run.system"
+            envelope["title"] = event_type.replace("_", " ").title()
+            envelope["payload"] = {"path": data.get("path"), "branch": data.get("branch")}
+
+        elif event_type == "fixing_started":
+            envelope["kind"] = "run.phase"
+            envelope["phase"] = "fixing"
+            envelope["title"] = "Fixing phase started"
+            envelope["payload"] = {"iteration": data.get("iteration")}
+
+        elif event_type == "fix_applied":
+            envelope["kind"] = "run.milestone"
+            envelope["title"] = f"Fix applied (iteration {data.get('iteration', '?')})"
+            envelope["payload"] = {"iteration": data.get("iteration")}
+
+        elif event_type in ("pipeline_stuck", "max_iterations_reached", "code_fixes_exhausted"):
+            envelope["kind"] = "run.system"
+            envelope["severity"] = "error"
+            envelope["title"] = event_type.replace("_", " ").title()
+            envelope["payload"] = {"message": str(data) if data else ""}
+
+        elif event_type == "dry_run_completed":
+            envelope["kind"] = "run.milestone"
+            envelope["title"] = "Dry run completed"
+            envelope["payload"] = {"milestone_name": "dry_run_completed"}
+
+        elif event_type == "pipeline_rejected":
+            envelope["kind"] = "run.milestone"
+            envelope["severity"] = "error"
+            envelope["title"] = "Pipeline rejected"
+            envelope["payload"] = {"feedback": data.get("feedback", "")}
+
+        else:
+            # Fallback for unknown events
+            envelope["kind"] = "run.system"
+            envelope["title"] = event_type.replace("_", " ").title() if event_type else "Unknown event"
+            envelope["payload"] = {"message": str(data) if data else ""}
+
+        return envelope
+
+    def _trace_event_to_sse(self, run_id: str, event: dict, line_number: int = 0) -> tuple[str, dict] | None:
+        """Convert a trace event to an SSE event type and data.
+
+        Now uses canonical event transformation for timeline UI.
+        Legacy v1 events are still supported for backward compatibility.
+        """
+        event_type = event.get("event", event.get("event_type", event.get("type", "")))
+        data = event.get("data", {})
+
+        # For v2 UI (timeline), return canonical events
+        if UI_VERSION == "v2":
+            canonical = self._to_canonical_event(run_id, event, line_number)
+            return ("timeline", canonical)
+
+        # Legacy v1 support below
+        if event_type in ("run_started", "pipeline_started"):
             return ("run:created", {
                 "run_id": run_id,
-                "issue_identifier": event.get("issue_identifier", ""),
-                "issue_title": event.get("issue_title", ""),
+                "issue_identifier": data.get("issue", event.get("issue_identifier", "")),
+                "issue_title": data.get("issue_title", event.get("issue_title", "")),
             })
         elif event_type == "status_change":
             return ("run:status", {
                 "run_id": run_id,
-                "status": event.get("status", ""),
-                "iteration": event.get("iteration"),
-                "confidence": event.get("confidence"),
+                "status": data.get("status", event.get("status", "")),
+                "iteration": data.get("iteration", event.get("iteration")),
+                "confidence": data.get("confidence", event.get("confidence")),
             })
         elif event_type in ("stdout", "stderr", "output"):
             return ("run:output", {
                 "run_id": run_id,
-                "content": event.get("content", event.get("data", "")),
+                "content": event.get("content", data.get("content", "")),
                 "stream": event_type if event_type in ("stdout", "stderr") else "stdout",
             })
-        elif event_type == "run_completed":
+        elif event_type in ("run_completed", "pipeline_completed"):
             return ("run:completed", {
                 "run_id": run_id,
-                "status": event.get("status", "completed"),
-                "final_confidence": event.get("confidence"),
+                "status": data.get("status", event.get("status", "completed")),
+                "final_confidence": data.get("confidence", event.get("confidence")),
             })
         elif event_type == "gate_pending":
             return ("gate:pending", {
                 "run_id": run_id,
-                "gate_type": event.get("gate_type", ""),
-                "critique": event.get("critique", {}),
+                "gate_type": data.get("gate_type", event.get("gate_type", "")),
+                "critique": data.get("critique", event.get("critique", {})),
             })
         elif event_type == "gate_resolved":
             return ("gate:resolved", {
                 "run_id": run_id,
-                "action": event.get("action", ""),
-                "feedback": event.get("feedback", ""),
+                "action": data.get("action", event.get("action", "")),
+                "feedback": data.get("feedback", event.get("feedback", "")),
             })
-        elif event_type == "error":
+        elif event_type in ("error", "pipeline_error"):
             return ("run:error", {
                 "run_id": run_id,
-                "error": event.get("error", event.get("message", "")),
+                "error": data.get("error", event.get("error", event.get("message", ""))),
             })
 
         return None
@@ -725,6 +1029,49 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             self._send_json({"error": str(e)}, 500)
 
+    def _stop_all_jobs(self) -> None:
+        """POST /api/jobs/stop-all - request graceful stop for all running jobs."""
+        jobs_dir = self.artifacts_dir / "jobs"
+        if not jobs_dir.exists():
+            self._send_json({"stopped": []})
+            return
+
+        stopped = []
+        for job_file in jobs_dir.glob("*.json"):
+            try:
+                data = json.loads(job_file.read_text())
+                job_id = data.get("job_id", job_file.stem)
+                pid = data.get("pid")
+                cmd = data.get("cmd", [])
+
+                # Skip if already stopping or stopped
+                if data.get("stop_requested_at") or data.get("status") in ("stopped", "completed"):
+                    continue
+
+                # Verify PID belongs to us
+                if not self._verify_pid(pid, cmd):
+                    # Process already dead - mark as completed
+                    self._cleanup_job_locks(job_id, data.get("issues", []))
+                    data["status"] = "completed"
+                    job_file.write_text(json.dumps(data, indent=2))
+                    continue
+
+                # Mark stop requested
+                data["stop_requested_at"] = datetime.now().isoformat()
+                data["status"] = "stopping"
+                job_file.write_text(json.dumps(data, indent=2))
+
+                # Send SIGTERM to process group
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGTERM)
+                    stopped.append(job_id)
+                except (OSError, ProcessLookupError):
+                    pass  # Race condition - already dead
+            except (json.JSONDecodeError, IOError):
+                continue
+
+        self._send_json({"stopped": stopped, "count": len(stopped)})
+
     def _hide_run(self, run_id: str) -> None:
         """POST /api/runs/{id}/hide - hide run from default view."""
         summary_path = self.artifacts_dir / run_id / "summary.json"
@@ -793,9 +1140,44 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 os.close(fd)
                 started.append(issue_id)
             except FileExistsError:
-                # Read existing lock to report which job owns it
+                # Check if lock is stale (pid=null and older than 60s, or pid not running)
                 try:
                     existing = json.loads(lock_path.read_text())
+                    pid = existing.get("pid")
+                    created_at = existing.get("created_at", "")
+                    is_stale = False
+
+                    if pid is None:
+                        # Lock without PID - check age (crash before spawn)
+                        try:
+                            lock_time = datetime.fromisoformat(created_at)
+                            age_seconds = (datetime.now() - lock_time).total_seconds()
+                            if age_seconds > 60:
+                                is_stale = True
+                                log("API", f"Removing stale lock (no pid, age={age_seconds:.0f}s): {issue_id}")
+                        except (ValueError, TypeError):
+                            is_stale = True  # Can't parse time, assume stale
+                    else:
+                        # Lock with PID - check if process is still running
+                        cmd = existing.get("cmd", [])
+                        if not self._verify_pid(pid, cmd):
+                            is_stale = True
+                            log("API", f"Removing stale lock (pid {pid} not running): {issue_id}")
+
+                    if is_stale:
+                        lock_path.unlink()
+                        # Retry acquiring the lock
+                        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                        lock_data = json.dumps({
+                            "job_id": job_id,
+                            "pid": None,
+                            "created_at": datetime.now().isoformat(),
+                        })
+                        os.write(fd, lock_data.encode())
+                        os.close(fd)
+                        started.append(issue_id)
+                        continue
+
                     reason_by_issue[issue_id] = f"locked by job {existing.get('job_id', 'unknown')[:8]}"
                 except (json.JSONDecodeError, IOError):
                     reason_by_issue[issue_id] = "already running"
@@ -815,13 +1197,21 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             })
             return
 
-        # Find ai-loop executable (don't hardcode uv)
+        # Find ai-loop executable - prefer the one in our venv
         ai_loop_path = shutil.which("ai-loop")
+        if not ai_loop_path:
+            # Check if we're running from a venv with ai-loop installed
+            venv_bin = Path(sys.executable).parent
+            venv_ai_loop = venv_bin / "ai-loop"
+            if venv_ai_loop.exists():
+                ai_loop_path = str(venv_ai_loop)
+
         if ai_loop_path:
             cmd = [ai_loop_path]
         else:
-            # Fallback to uv run
-            cmd = ["uv", "run", "--project", str(self.repo_root / "ai-loop"), "ai-loop"]
+            # Last resort: uv run from the ai-loop package directory (not repo_root)
+            ai_loop_pkg = Path(__file__).parent.parent.parent.parent  # src/ai_loop/web -> ai-loop/
+            cmd = ["uv", "run", "--project", str(ai_loop_pkg), "ai-loop"]
 
         cmd.extend([
             "batch",
@@ -839,9 +1229,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         log_path = jobs_dir / f"{job_id}.log"
 
         # Spawn subprocess with captured output
+        # Use ai-loop/ as cwd if it exists (for .env), otherwise repo_root
+        ai_loop_dir = self.repo_root / "ai-loop"
+        if not ai_loop_dir.is_dir():
+            ai_loop_dir = self.repo_root
         proc = subprocess.Popen(
             cmd,
-            cwd=str(self.repo_root),
+            cwd=str(ai_loop_dir),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,  # Merge stderr into stdout
             start_new_session=True,
@@ -883,7 +1277,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             "started_at": datetime.now().isoformat(),
             "mode": mode,
             "cmd": cmd,
-            "cwd": str(self.repo_root),
+            "cwd": str(ai_loop_dir),
             "status": "running",
             "stop_requested_at": None,
             "log_path": str(log_path),
@@ -1045,7 +1439,20 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._send_json({"error": "Not a git repository"}, 400)
             return
 
-        # Hard contract: refuse if any job is running
+        # Resolve the new path for comparison
+        new_path = new_path.resolve()
+
+        # Allow switch if we're already on the target project (no-op)
+        if new_path == self.repo_root.resolve():
+            self._send_json({
+                "project": {"path": str(new_path), "name": new_path.name},
+                "artifacts_dir": str(self.artifacts_dir),
+                "reconnect": False,
+            })
+            return
+
+        # Block switch only if there are active jobs in the CURRENT project
+        # (switching TO a project with running jobs is fine - they're already there)
         active_jobs = self._get_active_jobs()
         if active_jobs:
             job_ids = [j.get("job_id", "unknown")[:8] for j in active_jobs]
@@ -1054,9 +1461,6 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 "active_jobs": job_ids,
             }, 409)
             return
-
-        # Resolve and switch
-        new_path = new_path.resolve()
 
         # Update class-level config (affects all handlers)
         DashboardHandler.repo_root = new_path
@@ -1073,6 +1477,30 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             "project": entry,
             "artifacts_dir": str(DashboardHandler.artifacts_dir),
             "reconnect": True,
+        })
+
+    def _set_mode(self) -> None:
+        """POST /api/mode - toggle between dry_run and write_enabled modes.
+
+        Body: {"enable_writes": true/false}
+        Returns: {"mode": "write_enabled" | "dry_run", "enable_writes": bool}
+        """
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(content_length)) if content_length else {}
+
+        if "enable_writes" not in body:
+            self._send_json({"error": "enable_writes required"}, 400)
+            return
+
+        enable = bool(body["enable_writes"])
+        DashboardHandler.enable_writes = enable
+
+        mode = "write_enabled" if enable else "dry_run"
+        log("API", f"Mode changed to: {mode}")
+
+        self._send_json({
+            "mode": mode,
+            "enable_writes": enable,
         })
 
     def log_message(self, format: str, *args) -> None:
@@ -1195,3 +1623,62 @@ def run_server(
     print(f"Mode: {mode_str}")
     print()
     server.serve_forever()
+
+
+def create_server(
+    port: int,
+    dev_mode: bool = False,
+    pairing_token: str | None = None,
+    artifacts_dir: Path | None = None,
+    repo_root: Path | None = None,
+) -> ThreadingHTTPServer:
+    """Create HTTP server for dev mode.
+
+    In dev mode:
+    - Single server (no two-server startup optimization)
+    - No caching (Cache-Control: no-store)
+    - Tokens from args (stable across restarts)
+    - /api/status and /api/session endpoints
+
+    Args:
+        port: Server port
+        dev_mode: Enable dev mode (no caching)
+        pairing_token: Pairing token from parent (for dev mode stability)
+        artifacts_dir: Artifacts directory
+        repo_root: Repository root
+
+    Returns:
+        HTTPServer ready to serve_forever()
+    """
+    print(f"[Server] Starting with UI_VERSION={UI_VERSION}")
+
+    # Create security manager with injected or generated token
+    security = SecurityManager(pairing_token=pairing_token)
+
+    # Configure handler class
+    DashboardHandler.port = port
+    DashboardHandler.dev_mode = dev_mode
+    DashboardHandler.security = security
+    DashboardHandler.csrf_token = security.csrf_token
+
+    # Restore last project if no explicit repo_root provided
+    if not repo_root:
+        pm = get_project_manager()
+        last_project = pm.get_last_project()
+        if last_project:
+            repo_root = last_project
+            artifacts_dir = last_project / "artifacts"
+            log("Server", f"Restored last project: {last_project}")
+
+    if artifacts_dir:
+        DashboardHandler.artifacts_dir = artifacts_dir
+    if repo_root:
+        DashboardHandler.repo_root = repo_root
+
+    # Bind to loopback only for security
+    server = ThreadingHTTPServer(("127.0.0.1", port), DashboardHandler)
+
+    # Attach pairing token to server for external access
+    server.pairing_token = security.pairing_token  # type: ignore[attr-defined]
+
+    return server
