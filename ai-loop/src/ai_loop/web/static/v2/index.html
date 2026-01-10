@@ -7,6 +7,8 @@
   <link rel="stylesheet" href="/v2/css/tokens.css">
   <link rel="stylesheet" href="/v2/css/components.css">
   <link rel="stylesheet" href="/v2/css/utilities.css">
+  <link rel="stylesheet" href="/v2/css/onboarding.css">
+  <link rel="stylesheet" href="/v2/css/timeline.css">
   <style>
     /* Toast Notifications */
     #notification-container {
@@ -166,38 +168,25 @@
       <!-- Resizer -->
       <div class="split-pane__resizer" id="resizer"></div>
 
-      <!-- Right Panel: Detail View -->
+      <!-- Right Panel: Timeline View -->
       <section class="split-pane__right" id="right-panel">
-        <!-- Tab bar -->
-        <div class="tab-bar">
-          <button class="tab active" data-tab="output">Output</button>
-          <button class="tab" data-tab="files">Files</button>
-          <button class="tab" data-tab="critique">Critique</button>
-        </div>
-
-        <!-- Content area -->
-        <div class="split-pane__content">
-          <!-- Output tab -->
-          <div class="tab-panel active" id="tab-output">
-            <div class="output-stream" id="output-stream">
-              <pre class="output-stream__content" id="output-pre">Select a run to view output...</pre>
-            </div>
-          </div>
-
-          <!-- Files tab -->
-          <div class="tab-panel hidden" id="tab-files">
-            <div class="files-viewer" id="files-viewer">
-              <p class="text-secondary p-4">File changes will appear here</p>
-            </div>
-          </div>
-
-          <!-- Critique tab -->
-          <div class="tab-panel hidden" id="tab-critique">
-            <div class="critique-viewer" id="critique-viewer">
-              <p class="text-secondary p-4">Critique results will appear here</p>
-            </div>
+        <!-- Timeline Header -->
+        <div class="timeline-header">
+          <span id="timeline-run-title">Select a run</span>
+          <div class="timeline-header__actions">
+            <button id="btn-expand-all" class="btn btn-xs btn-ghost" title="Expand All (Cmd+E)">Expand</button>
+            <button id="btn-collapse-all" class="btn btn-xs btn-ghost" title="Collapse All (Cmd+Shift+E)">Collapse</button>
+            <button id="btn-stop" class="btn btn-xs btn-danger hidden">Stop</button>
           </div>
         </div>
+
+        <!-- Timeline Container -->
+        <div class="timeline-container" id="timeline-container">
+          <div class="timeline-empty">Select a run to view timeline</div>
+        </div>
+
+        <!-- Jump to Latest Button -->
+        <button id="btn-jump-latest" class="timeline-jump hidden">Jump to latest</button>
 
         <!-- Feedback bar (shown at gates) -->
         <div class="feedback-bar hidden" id="feedback-bar">
@@ -240,9 +229,15 @@
     </div>
   </div>
 
-  <!-- Scripts -->
+  <!-- Vendor libs (bundled, version-pinned) -->
+  <script src="/v2/vendor/marked.min.js"></script>
+  <script src="/v2/vendor/purify.min.js"></script>
+  <script src="/v2/js/markdown.js"></script>
+  <!-- App scripts -->
+  <script src="/v2/js/onboarding.js"></script>
   <script src="/v2/js/store.js"></script>
   <script src="/v2/js/events.js"></script>
+  <script src="/v2/js/timeline.js"></script>
   <script src="/v2/js/components.js"></script>
   <script src="/v2/js/app.js"></script>
 </body>

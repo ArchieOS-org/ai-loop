@@ -22,9 +22,16 @@ from ai_loop.integrations.linear import LinearClient
 app = typer.Typer(
     name="ai-loop",
     help="CLI orchestrator: Linear issues → Claude plans → Codex critique → Claude implementation",
-    no_args_is_help=True,
+    invoke_without_command=True,
 )
 console = Console()
+
+
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context) -> None:
+    """Default: launch web dashboard."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(serve)
 
 
 def _get_default_bool(env_value: bool | None, default: bool) -> bool:
@@ -467,6 +474,119 @@ def serve(
         repo_root=repo_root,
         enable_writes=enable_writes,
     )
+
+
+@app.command()
+def dev(
+    port: Annotated[int, typer.Option("--port", "-p", help="Server port")] = 8080,
+    no_open: Annotated[bool, typer.Option("--no-open", help="Don't open browser")] = False,
+) -> None:
+    """Start dev server with auto-reload and no caching.
+
+    Development mode features:
+    - Auto-restart on Python file changes (requires watchfiles)
+    - No caching for static assets
+    - Stable tokens across restarts
+    - Browser opens AFTER server is ready
+    """
+    import os
+    import secrets as _secrets
+
+    # Dev mode uses v2 UI - MUST set before importing server.py
+    os.environ["AI_LOOP_UI_VERSION"] = "v2"
+
+    from ai_loop.integrations.git_tools import GitTools
+    from ai_loop.web.server import ProjectManager
+
+    pm = ProjectManager()
+
+    # Find project root
+    try:
+        git = GitTools()
+        repo_root = git.get_repo_root()
+    except Exception:
+        repo_root = pm.get_last_project()
+        if not repo_root:
+            console.print("[red]Error: No project found.[/red]")
+            console.print("Run from a git repository")
+            raise typer.Exit(1)
+
+    pm.add_project(repo_root)
+
+    artifacts_dir = repo_root / "artifacts"
+    artifacts_dir.mkdir(exist_ok=True)
+
+    # PARENT generates pairing token ONCE - stable for entire dev session
+    pairing_token = _secrets.token_urlsafe(32)
+
+    # Check for watchfiles
+    try:
+        import watchfiles
+        has_watchfiles = True
+    except ImportError:
+        has_watchfiles = False
+        console.print(
+            "[yellow]Auto-reload disabled.[/yellow] "
+            "Install watchfiles for auto-reload:\n"
+            "  uv pip install watchfiles"
+        )
+
+    console.print(f"[dim]Dashboard:[/dim] http://127.0.0.1:{port}")
+    console.print(f"[dim]Press Ctrl+C to stop[/dim]\n")
+
+    if has_watchfiles:
+        from ai_loop.dev_server import run_with_autoreload
+        run_with_autoreload(
+            port=port,
+            pairing_token=pairing_token,
+            no_open=no_open,
+            repo_root=repo_root,
+            artifacts_dir=artifacts_dir,
+        )
+    else:
+        _run_dev_server_direct(
+            port=port,
+            pairing_token=pairing_token,
+            no_open=no_open,
+            repo_root=repo_root,
+            artifacts_dir=artifacts_dir,
+        )
+
+
+def _run_dev_server_direct(
+    port: int,
+    pairing_token: str,
+    no_open: bool,
+    repo_root: Path,
+    artifacts_dir: Path,
+) -> None:
+    """Run server directly (no auto-reload, for when watchfiles not installed)."""
+    import webbrowser
+
+    from ai_loop.web.server import create_server
+
+    server = create_server(
+        port=port,
+        dev_mode=True,
+        pairing_token=pairing_token,
+        artifacts_dir=artifacts_dir,
+        repo_root=repo_root,
+    )
+
+    if not no_open:
+        url = f"http://127.0.0.1:{port}?token={pairing_token}"
+        webbrowser.open(url)
+        console.print(f"[green]✓[/green] Opening browser...")
+
+    console.print(f"[green]✓[/green] Server ready (no auto-reload)")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        console.print("\n[dim]Shutting down...[/dim]")
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 if __name__ == "__main__":
